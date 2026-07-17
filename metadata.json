@@ -1,0 +1,6 @@
+{
+  "name": "缪斯时装门店排号与缺货登记",
+  "description": "专为高级服装店定制的排号系统。包含顾客自助扫码取号（试衣间/改衣/结账）、实时查看进度，以及商品缺货快速登记（含手机号、尺码和数量选择），并能向店长端实时推送更新通知。",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
