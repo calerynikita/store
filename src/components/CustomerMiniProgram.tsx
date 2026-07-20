@@ -32,7 +32,8 @@ import {
   Store,
   ChevronDown,
   Search,
-  Filter
+  Filter,
+  History
 } from "lucide-react";
 import { Ticket, MenuItem, QueueStatus, OutOfStockRegistration, AdminNotification } from "../types";
 
@@ -52,6 +53,7 @@ interface CustomerMiniProgramProps {
   onHandleOutOfStock: (registrationId: string) => void;
   onClearNotification: (id?: string) => void;
   onResetSystem: () => void;
+  currentView?: string;
 }
 
 const ALL_SCHOOLS = [
@@ -97,7 +99,8 @@ export default function CustomerMiniProgram({
   onCompleteTicket,
   onHandleOutOfStock,
   onClearNotification,
-  onResetSystem
+  onResetSystem,
+  currentView: propCurrentView
 }: CustomerMiniProgramProps) {
   // Persistence state
   const [selectedSchool, setSelectedSchool] = useState<string | null>(() => {
@@ -125,6 +128,93 @@ export default function CustomerMiniProgram({
   // Big Screen TV Clock, Audio Speech Synthesis, and Auto Calling states
   const [currentTime, setCurrentTime] = useState("");
   const [autoCallMode, setAutoCallMode] = useState(false);
+  const [showRemote, setShowRemote] = useState(false);
+
+  // Parse URL parameter to support fully separated screens (mini vs tv vs split)
+  const [currentView, setCurrentView] = useState<"split" | "mini" | "tv">(() => {
+    if (typeof window !== "undefined") {
+      const params = new URLSearchParams(window.location.search);
+      const viewParam = params.get("view");
+      if (viewParam === "mini" || viewParam === "tv" || viewParam === "split") {
+        return viewParam as any;
+      }
+    }
+    return "split";
+  });
+
+  // Track local order/ticket history
+  const [historyTickets, setHistoryTickets] = useState<any[]>(() => {
+    try {
+      const historyJson = localStorage.getItem("boutique_ticket_history") || "[]";
+      return JSON.parse(historyJson);
+    } catch {
+      return [];
+    }
+  });
+
+  const addToHistory = (ticket: any, schoolName: string, items?: any[]) => {
+    try {
+      const historyJson = localStorage.getItem("boutique_ticket_history") || "[]";
+      const history = JSON.parse(historyJson);
+      if (history.some((h: any) => h.id === ticket.id)) {
+        return;
+      }
+      const newHistoryItem = {
+        id: ticket.id,
+        number: ticket.number,
+        type: ticket.type,
+        schoolName: schoolName,
+        timestamp: ticket.timestamp,
+        orderedItems: items || [],
+        status: ticket.status || "waiting"
+      };
+      const updatedHistory = [newHistoryItem, ...history].slice(0, 15);
+      localStorage.setItem("boutique_ticket_history", JSON.stringify(updatedHistory));
+      setHistoryTickets(updatedHistory);
+    } catch (err) {
+      console.error("Failed to write to local history:", err);
+    }
+  };
+
+  useEffect(() => {
+    const handleUrlChange = () => {
+      const params = new URLSearchParams(window.location.search);
+      const viewParam = params.get("view");
+      if (viewParam === "mini" || viewParam === "tv" || viewParam === "split") {
+        setCurrentView(viewParam as any);
+      }
+    };
+    window.addEventListener("popstate", handleUrlChange);
+    const interval = setInterval(handleUrlChange, 1000);
+    return () => {
+      window.removeEventListener("popstate", handleUrlChange);
+      clearInterval(interval);
+    };
+  }, []);
+
+  // Synchronize history status with live queueStatus
+  const syncedHistory = historyTickets.map(item => {
+    let currentStatus = item.status;
+    const isWaiting = (queueStatus?.waitingList.U.some(t => t.id === item.id)) ||
+                      (queueStatus?.waitingList.A.some(t => t.id === item.id)) ||
+                      (queueStatus?.waitingList.C.some(t => t.id === item.id));
+                      
+    const isCalled = queueStatus?.currentCalled.U === item.number ||
+                     queueStatus?.currentCalled.A === item.number ||
+                     queueStatus?.currentCalled.C === item.number;
+                     
+    if (isCalled) {
+      currentStatus = "called";
+    } else if (isWaiting) {
+      currentStatus = "waiting";
+    } else {
+      if (item.status === "waiting" || item.status === "called") {
+        currentStatus = "completed";
+      }
+    }
+    
+    return { ...item, status: currentStatus };
+  });
 
   useEffect(() => {
     const updateClock = () => {
@@ -136,16 +226,46 @@ export default function CustomerMiniProgram({
     return () => clearInterval(timer);
   }, []);
 
+  useEffect(() => {
+    if (propCurrentView) {
+      setCurrentView(propCurrentView as any);
+    }
+  }, [propCurrentView]);
+
   const speakCall = (num: string, type: "U" | "A" | "C") => {
-    if (!window.speechSynthesis) return;
     try {
-      window.speechSynthesis.cancel(); // cancel any active speech first
+      if (typeof window === "undefined") return;
+      
+      const hasSpeech = "speechSynthesis" in window && 
+                        typeof window.speechSynthesis !== "undefined" && 
+                        window.speechSynthesis !== null;
+      if (!hasSpeech) return;
+
+      const UtteranceClass = window.SpeechSynthesisUtterance || (window as any).webkitSpeechSynthesisUtterance;
+      if (!UtteranceClass || typeof UtteranceClass !== "function") {
+        return;
+      }
+
       const typeName = type === "U" ? "校服发配处" : type === "A" ? "试衣改衣台" : "现场收银台";
       const text = `请 ${num.split("").join(" ")} 号顾客，前往 ${typeName} 办理业务。`;
-      const utterance = new SpeechSynthesisUtterance(text);
+      
+      let utterance: SpeechSynthesisUtterance;
+      try {
+        utterance = new UtteranceClass(text);
+      } catch (err) {
+        console.warn("SpeechSynthesisUtterance is not constructible in this environment:", err);
+        return;
+      }
+
+      window.speechSynthesis.cancel();
       utterance.lang = "zh-CN";
       utterance.rate = 0.85;
       utterance.pitch = 1.05;
+      
+      utterance.onerror = (event) => {
+        console.warn("SpeechSynthesisUtterance async error:", event);
+      };
+
       window.speechSynthesis.speak(utterance);
     } catch (e) {
       console.warn("TTS Speech error:", e);
@@ -413,6 +533,9 @@ export default function CustomerMiniProgram({
       setOrderSuccess(true);
       setCart([]); // Clear cart
       
+      // Save to local history!
+      addToHistory(result.ticket, schoolName, orderItems);
+
       setTimeout(() => {
         setOrderSuccess(false);
         setShowCheckoutModal(false);
@@ -442,6 +565,10 @@ export default function CustomerMiniProgram({
         localStorage.setItem("my_boutique_ticket_id", data.ticket.id);
         setShowManualTicketModal(false);
         setManualPhone("");
+        
+        // Save to local history!
+        addToHistory(data.ticket, getSchoolNameById(selectedSchool));
+
         onRefreshQueue();
         setActiveTab("queue");
       } else {
@@ -458,11 +585,33 @@ export default function CustomerMiniProgram({
   // Quit/Cancel active queue ticket
   const handleCancelTicket = () => {
     if (confirm("确定要放弃您当前的排队号码吗？如果已经完成付款，请咨询柜台老师。")) {
+      // Save current ticket to history before clearing if it exists
+      if (myTicketDetail && myTicketDetail.ticket) {
+        addToHistory(myTicketDetail.ticket, myTicketDetail.ticket.schoolName || getSchoolNameById(selectedSchool), myTicketDetail.ticket.orderedItems);
+      }
       localStorage.removeItem("my_boutique_ticket_id");
       setMyTicketId(null);
       setMyTicketDetail(null);
       onRefreshQueue();
     }
+  };
+
+  // Switch to another order while keeping current one active in history
+  const handleOrderAnother = () => {
+    if (myTicketDetail && myTicketDetail.ticket) {
+      addToHistory(myTicketDetail.ticket, myTicketDetail.ticket.schoolName || getSchoolNameById(selectedSchool), myTicketDetail.ticket.orderedItems);
+    }
+    localStorage.removeItem("my_boutique_ticket_id");
+    setMyTicketId(null);
+    setMyTicketDetail(null);
+    setActiveTab("catalog");
+  };
+
+  // Reactivate a ticket from history to track its progress
+  const handleReactivateTicket = (ticketId: string) => {
+    setMyTicketId(ticketId);
+    localStorage.setItem("my_boutique_ticket_id", ticketId);
+    setActiveTab("queue");
   };
 
   // Resolve queue type names
@@ -509,48 +658,50 @@ export default function CustomerMiniProgram({
   const filteredItems = getFilteredItems();
   const unreadCount = notifications.filter(n => !n.read).length;
 
+  const showLeft = currentView === "split" || currentView === "mini";
+  const showRight = currentView === "split" || currentView === "tv";
+
   return (
-    <div className="flex flex-col xl:flex-row gap-8 items-start justify-center w-full max-w-6xl mx-auto px-4 py-2">
+    <div className={`flex flex-col xl:flex-row gap-8 items-start justify-center w-full ${
+      currentView === "split" ? "max-w-6xl" : "max-w-4xl"
+    } mx-auto px-4 py-2`}>
       
-      {/* ========================================================== */}
-      {/* LEFT: School Uniform Micro-Program Device Simulator (Deep Blue Theme) */}
-      {/* ========================================================== */}
-      <div className="relative shrink-0 mx-auto">
+      {showLeft && (
+        <div className={`relative shrink-0 mx-auto ${currentView === "mini" ? "xl:scale-105 my-4" : ""}`}>
         
         {/* Soft glowing ambient backing */}
         <div className="absolute inset-8 bg-blue-500/10 blur-[80px] rounded-full pointer-events-none"></div>
 
-        {/* WeChat Simulator Outer shell - Classic School Uniform Navy Styling */}
-        <div className="w-[385px] h-[795px] bg-[#0c1122] border-[10px] border-[#1e2945] rounded-[48px] overflow-hidden shadow-[0_30px_70px_-10px_rgba(3,7,18,0.95)] relative flex flex-col select-none border-double">
+        {/* WeChat Simulator Outer shell - Classic School Uniform Premium White Styling */}
+        <div className="w-[385px] h-[795px] bg-[#f8fafc] border-[10px] border-[#cbd5e1] rounded-[48px] overflow-hidden shadow-[0_30px_70px_-10px_rgba(15,23,42,0.15)] relative flex flex-col select-none border-double">
           
           {/* A. Top status Bar / Notch */}
-          <div className="bg-[#070b16] text-slate-400 h-11 px-6 flex justify-between items-center text-xs font-semibold relative shrink-0">
-            <div className="absolute left-1/2 -translate-x-1/2 top-0 bg-[#070b16] w-36 h-5 rounded-b-2xl flex items-center justify-center border-b border-slate-900">
-              <span className="w-2 h-2 bg-slate-900 rounded-full border border-slate-800"></span>
+          <div className="bg-slate-100 text-slate-600 h-11 px-6 flex justify-between items-center text-xs font-semibold relative shrink-0 border-b border-slate-200/50">
+            <div className="absolute left-1/2 -translate-x-1/2 top-0 bg-slate-100 w-36 h-5 rounded-b-2xl flex items-center justify-center border-b border-slate-200">
+              <span className="w-2 h-2 bg-slate-300 rounded-full border border-slate-200"></span>
             </div>
-            <div>19:51</div>
+            <div>12:30</div>
             <div className="flex items-center space-x-1.5 text-slate-500">
               <span className="text-[9px] font-mono">5G</span>
-              <div className="w-5 h-2.5 border border-slate-700 rounded-xs p-[1px] flex items-center">
-                <div className="w-full h-full bg-slate-400 rounded-2xs"></div>
+              <div className="w-5 h-2.5 border border-slate-300 rounded-xs p-[1px] flex items-center">
+                <div className="w-full h-full bg-slate-500 rounded-2xs"></div>
               </div>
             </div>
           </div>
 
           {/* B. WeChat Header bar with Deep Blue School Uniform Logo / Title */}
-          <div className="bg-[#0b1226] border-b border-blue-950 text-slate-100 px-4 py-3 flex items-center justify-between shrink-0">
+          <div className="bg-white border-b border-slate-200 text-slate-800 px-4 py-3 flex items-center justify-between shrink-0">
             <div className="flex items-center space-x-2.5">
               {/* Premium Deep Blue Shield Logo Crest Design */}
-              <div className="w-6 h-6 bg-gradient-to-br from-blue-900 via-indigo-950 to-slate-900 rounded-lg flex items-center justify-center shadow-lg border border-blue-700/40 relative">
-                <div className="absolute inset-0 rounded-lg bg-blue-500/10 animate-pulse"></div>
-                <GraduationCap size={13} className="text-blue-300 relative z-10" />
+              <div className="w-6 h-6 bg-gradient-to-br from-blue-50 to-blue-100 rounded-lg flex items-center justify-center shadow-xs border border-blue-200 relative">
+                <GraduationCap size={13} className="text-blue-600 relative z-10" />
               </div>
               <div className="flex flex-col">
-                <span className="font-black text-[11px] tracking-wider font-sans text-white leading-none">
+                <span className="font-black text-[11px] tracking-wider font-sans text-slate-800 leading-none">
                   阳光校服智能排号
                 </span>
-                <span className="text-[7.5px] text-blue-400 font-mono tracking-widest leading-none mt-0.5 uppercase">
-                  Sunny Deep-Blue
+                <span className="text-[7.5px] text-blue-600 font-mono tracking-widest leading-none mt-0.5 uppercase">
+                  Sunny Delivery
                 </span>
               </div>
             </div>
@@ -567,29 +718,29 @@ export default function CustomerMiniProgram({
                     handleSimulateScan("first");
                   }
                 }}
-                className="bg-blue-600/20 hover:bg-blue-600/35 text-blue-300 border border-blue-500/30 px-2 py-1.5 rounded-full text-[8px] font-extrabold flex items-center space-x-1 transition-all cursor-pointer animate-pulse"
+                className="bg-blue-50 hover:bg-blue-100 text-blue-600 border border-blue-200 px-2 py-1.5 rounded-full text-[8px] font-extrabold flex items-center space-x-1 transition-all cursor-pointer shadow-xs animate-pulse"
                 title="模拟在门店中再次扫描货架上的二维码"
               >
-                <QrCode size={10} className="text-blue-400" />
+                <QrCode size={10} className="text-blue-500" />
                 <span>📷 模拟扫码</span>
               </button>
 
-              <div className="bg-black/30 border border-slate-800 rounded-full px-2 py-1 flex items-center space-x-2.5 text-slate-400 scale-85">
+              <div className="bg-slate-100 border border-slate-200 rounded-full px-2 py-1 flex items-center space-x-2.5 text-slate-600 scale-85">
                 <div className="flex space-x-1">
-                  <span className="w-1 h-1 bg-slate-400 rounded-full"></span>
-                  <span className="w-1 h-1 bg-slate-400 rounded-full"></span>
-                  <span className="w-1 h-1 bg-slate-400 rounded-full"></span>
+                  <span className="w-1 h-1 bg-slate-500 rounded-full"></span>
+                  <span className="w-1 h-1 bg-slate-500 rounded-full"></span>
+                  <span className="w-1 h-1 bg-slate-500 rounded-full"></span>
                 </div>
-                <div className="w-[1px] h-2.5 bg-slate-800"></div>
+                <div className="w-[1px] h-2.5 bg-slate-200"></div>
                 <div className="w-3 h-3 border border-slate-400 rounded-full flex items-center justify-center relative">
-                  <span className="w-1 h-1 bg-slate-400 rounded-full"></span>
+                  <span className="w-1 h-1 bg-slate-500 rounded-full"></span>
                 </div>
               </div>
             </div>
           </div>
 
           {/* C. Scrollable Content Window */}
-          <div className="flex-1 overflow-y-auto pb-20 bg-[#080c18] scrollbar-none relative">
+          <div className="flex-1 overflow-y-auto pb-20 bg-slate-50 scrollbar-none relative">
             
             {/* Simulation Notification Toast Overlay */}
             <AnimatePresence>
@@ -623,15 +774,15 @@ export default function CustomerMiniProgram({
                   <motion.div 
                     initial={{ scale: 0.95, opacity: 0 }}
                     animate={{ scale: 1, opacity: 1 }}
-                    className="bg-gradient-to-r from-blue-950 via-indigo-950 to-blue-950 border border-blue-500/40 p-3 rounded-xl flex items-center justify-between shadow-lg"
+                    className="bg-gradient-to-r from-blue-50 via-indigo-50 to-blue-50 border border-blue-200 p-3 rounded-xl flex items-center justify-between shadow-xs"
                   >
                     <div className="flex items-center space-x-2">
-                      <div className="w-8 h-8 rounded-lg bg-blue-500/20 flex items-center justify-center text-blue-400">
+                      <div className="w-8 h-8 rounded-lg bg-blue-100 flex items-center justify-center text-blue-600 shadow-xs">
                         <Users size={15} />
                       </div>
                       <div className="text-left">
-                        <span className="text-[9px] text-blue-300 font-bold block leading-none">再次扫码智能识别：</span>
-                        <p className="text-[11px] text-white font-extrabold mt-1">您有正在等候的号码 <span className="text-blue-400 font-mono text-xs">{myTicketDetail.ticket.number}</span></p>
+                        <span className="text-[9px] text-blue-600 font-bold block leading-none">再次扫码智能识别：</span>
+                        <p className="text-[11px] text-slate-800 font-extrabold mt-1">您有正在等候的号码 <span className="text-blue-600 font-mono text-xs">{myTicketDetail.ticket.number}</span></p>
                       </div>
                     </div>
                     <button
@@ -644,7 +795,7 @@ export default function CustomerMiniProgram({
                         }
                         setActiveTab("queue");
                       }}
-                      className="bg-blue-600 hover:bg-blue-500 text-white text-[9px] font-black px-2.5 py-1.5 rounded-lg shadow-md transition-all shrink-0 cursor-pointer"
+                      className="bg-blue-600 hover:bg-blue-500 text-white text-[9px] font-black px-2.5 py-1.5 rounded-lg shadow-xs transition-all shrink-0 cursor-pointer"
                     >
                       秒开进度卡
                     </button>
@@ -652,43 +803,43 @@ export default function CustomerMiniProgram({
                 )}
 
                 {/* Store Information Card */}
-                <div className="bg-gradient-to-br from-[#0c142c] to-[#080d1e] border border-blue-900/40 rounded-2xl p-4 space-y-3 shadow-md shadow-blue-950/40 relative overflow-hidden">
+                <div className="bg-white border border-slate-200 rounded-2xl p-4 space-y-3 shadow-xs relative overflow-hidden">
                   <div className="absolute top-0 right-0 w-24 h-24 bg-blue-500/5 rounded-full blur-xl pointer-events-none"></div>
                   
                   {/* Store Name and Live Status */}
                   <div className="flex items-start justify-between">
                     <div className="space-y-1">
                       <div className="flex items-center space-x-2">
-                        <Store size={15} className="text-blue-400" />
-                        <h3 className="text-[13px] font-black text-white tracking-wider">阳光校服·中山北路智能体验馆</h3>
+                        <Store size={15} className="text-blue-600" />
+                        <h3 className="text-[13px] font-black text-slate-800 tracking-wider">阳光校服·中山北路智能体验馆</h3>
                       </div>
-                      <p className="text-[9.5px] text-slate-400 flex items-center gap-1">
-                        <MapPin size={10} className="text-slate-500 shrink-0" />
+                      <p className="text-[9.5px] text-slate-500 flex items-center gap-1">
+                        <MapPin size={10} className="text-slate-400 shrink-0" />
                         <span>拱墅区中山北路88号首层 (中山北路校区旁)</span>
                       </p>
                     </div>
-                    <span className="text-[8px] bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 px-1.5 py-0.5 rounded font-black font-sans uppercase animate-pulse shrink-0">
+                    <span className="text-[8px] bg-emerald-50 text-emerald-600 border border-emerald-200 px-1.5 py-0.5 rounded font-black font-sans uppercase shrink-0">
                       营业中
                     </span>
                   </div>
 
                   {/* Divider */}
-                  <div className="border-t border-blue-950/50"></div>
+                  <div className="border-t border-slate-100"></div>
 
                   {/* Opening hours, Phone & Capacity */}
-                  <div className="grid grid-cols-2 gap-y-2 gap-x-3 text-[9.5px] text-slate-300 font-medium">
-                    <div className="flex items-center space-x-1.5 text-slate-400">
+                  <div className="grid grid-cols-2 gap-y-2 gap-x-3 text-[9.5px] text-slate-600 font-medium">
+                    <div className="flex items-center space-x-1.5">
                       <Clock size={11} className="text-blue-500 shrink-0" />
                       <span>营业时间：09:00 - 21:00</span>
                     </div>
-                    <div className="flex items-center space-x-1.5 text-slate-400">
+                    <div className="flex items-center space-x-1.5">
                       <Phone size={11} className="text-blue-500 shrink-0" />
                       <span>咨询电话：0571-88888888</span>
                     </div>
-                    <div className="col-span-2 text-[9.5px] bg-[#050914] text-slate-400 p-2 rounded-lg border border-blue-950/25 flex items-start space-x-1.5 leading-relaxed">
-                      <div className="w-1.5 h-1.5 bg-blue-400 rounded-full mt-1.5 shrink-0"></div>
+                    <div className="col-span-2 text-[9.5px] bg-slate-50 text-slate-500 p-2 rounded-lg border border-slate-200/60 flex items-start space-x-1.5 leading-relaxed">
+                      <div className="w-1.5 h-1.5 bg-blue-500 rounded-full mt-1.5 shrink-0"></div>
                       <span>
-                        <strong className="text-blue-300">选校指南：</strong>到店家长请先在下方搜索并绑定孩子就读的学校，即可自动调取该校的现货校服并进行快捷排号领取。
+                        <strong className="text-blue-600">到店自助指南：</strong>到店家长请先在下方搜索并绑定孩子就读的学校，即可自动调取该校的现货校服并自助扫码下单，无需前台排队！
                       </span>
                     </div>
                   </div>
@@ -696,7 +847,7 @@ export default function CustomerMiniProgram({
 
                 {/* Search Bar */}
                 <div className="relative">
-                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-500">
+                  <div className="absolute inset-y-0 left-0 pl-3 flex items-center pointer-events-none text-slate-400">
                     <Search size={13} />
                   </div>
                   <input
@@ -704,12 +855,12 @@ export default function CustomerMiniProgram({
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="输入学校全称、城区地名或首字母搜索..."
-                    className="w-full bg-[#090e1c] border border-blue-900/40 rounded-xl py-2 pl-8.5 pr-8 text-[11px] font-semibold text-white placeholder-slate-600 focus:outline-none focus:border-blue-500 font-sans"
+                    className="w-full bg-white border border-slate-200 rounded-xl py-2 pl-8.5 pr-8 text-[11px] font-semibold text-slate-800 placeholder-slate-400 focus:outline-none focus:border-blue-500 font-sans shadow-xs"
                   />
                   {searchQuery && (
                     <button 
                       onClick={() => setSearchQuery("")} 
-                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-500 hover:text-white text-xs cursor-pointer font-bold"
+                      className="absolute inset-y-0 right-0 pr-3 flex items-center text-slate-400 hover:text-slate-600 text-xs cursor-pointer font-bold"
                     >
                       ✕
                     </button>
@@ -722,7 +873,7 @@ export default function CustomerMiniProgram({
                   {/* Schools list area */}
                   <div className="flex-1 space-y-2 max-h-[300px] overflow-y-auto pr-1 scrollbar-thin">
                     <div className="flex justify-between items-center px-1">
-                      <span className="text-[9.5px] font-black tracking-widest text-blue-400/85 uppercase">
+                      <span className="text-[9.5px] font-black tracking-widest text-slate-600 uppercase">
                         合作中小学校 ({
                           ALL_SCHOOLS.filter(school => {
                             const query = searchQuery.trim().toLowerCase();
@@ -737,7 +888,7 @@ export default function CustomerMiniProgram({
                       {searchQuery && (
                         <button 
                           onClick={() => setSearchQuery("")}
-                          className="text-[8.5px] text-blue-400 hover:underline font-extrabold"
+                          className="text-[8.5px] text-blue-600 hover:underline font-extrabold"
                         >
                           重置搜索
                         </button>
@@ -757,7 +908,7 @@ export default function CustomerMiniProgram({
 
                         if (filtered.length === 0) {
                           return (
-                            <div className="text-center py-10 text-[10px] text-slate-500 italic bg-[#090e1c]/30 rounded-xl border border-blue-950/20">
+                            <div className="text-center py-10 text-[10px] text-slate-400 italic bg-white rounded-xl border border-slate-200 shadow-xs">
                               没有找到符合条件的学校，请换个词搜索
                             </div>
                           );
@@ -769,20 +920,20 @@ export default function CustomerMiniProgram({
                             onClick={() => handleSelectSchool(school.id)}
                             whileHover={{ scale: 1.01 }}
                             whileTap={{ scale: 0.99 }}
-                            className="w-full bg-[#0a0e1b] border border-blue-900/30 hover:border-blue-500/40 rounded-xl p-2.5 text-left flex items-center justify-between shadow-sm transition-all group cursor-pointer"
+                            className="w-full bg-white border border-slate-200 hover:border-blue-300 rounded-xl p-2.5 text-left flex items-center justify-between shadow-xs transition-all group cursor-pointer"
                           >
                             <div className="space-y-0.5 max-w-[85%]">
                               <div className="flex items-center space-x-1.5">
-                                <span className="text-[9px] bg-blue-950 text-blue-300 font-black w-3.5 h-3.5 rounded-full flex items-center justify-center font-mono shrink-0">
+                                <span className="text-[9px] bg-blue-50 text-blue-600 font-black w-3.5 h-3.5 rounded-full flex items-center justify-center font-mono shrink-0">
                                   {school.alphabet}
                                 </span>
-                                <h3 className="text-[11px] font-black text-slate-100 truncate">{school.name}</h3>
+                                <h3 className="text-[11px] font-black text-slate-800 truncate">{school.name}</h3>
                               </div>
-                              <p className="text-[9px] text-slate-400 pl-5 truncate">
+                              <p className="text-[9px] text-slate-500 pl-5 truncate">
                                 {school.desc} | {school.addr}
                               </p>
                             </div>
-                            <div className="w-5 h-5 rounded-full bg-blue-950/80 border border-blue-900/40 flex items-center justify-center text-blue-400 shrink-0">
+                            <div className="w-5 h-5 rounded-full bg-slate-50 border border-slate-200 flex items-center justify-center text-slate-400 shrink-0 group-hover:text-blue-600 transition-colors">
                               <ChevronRight size={10} />
                             </div>
                           </motion.button>
@@ -794,10 +945,10 @@ export default function CustomerMiniProgram({
                 </div>
 
                 {/* QR Code description */}
-                <div className="bg-slate-950/80 border border-blue-950/40 rounded-xl p-2.5 flex items-start space-x-1.5 text-[9px] text-slate-400 leading-normal">
+                <div className="bg-white border border-slate-200 rounded-xl p-2.5 flex items-start space-x-1.5 text-[9px] text-slate-500 leading-normal shadow-xs">
                   <QrCode size={14} className="text-blue-500 shrink-0 mt-0.5" />
                   <div>
-                    <span className="font-extrabold text-blue-300">入店扫码说明：</span>
+                    <span className="font-extrabold text-blue-600">入店自助选购说明：</span>
                     顾客入店扫描货架上的校服专属二维码，可直接绑定该校校服。再次扫描该码系统将直接加载您已提交的订单排队窗口，无需重复搜索！
                   </div>
                 </div>
@@ -807,45 +958,45 @@ export default function CustomerMiniProgram({
               <div className="p-4 space-y-4">
                 
                 {/* Active School Ribbon Header */}
-                <div className="bg-gradient-to-r from-blue-950 via-slate-900 to-blue-950 border border-blue-900/40 rounded-2xl p-3.5 flex items-center justify-between shadow-md">
+                <div className="bg-gradient-to-r from-blue-600 to-indigo-600 border border-blue-500 rounded-2xl p-3.5 flex items-center justify-between shadow-xs text-white">
                   <div className="flex items-center space-x-2.5">
-                    <div className="p-1.5 bg-blue-900/30 border border-blue-800/40 rounded-lg text-blue-400">
+                    <div className="p-1.5 bg-white/20 border border-white/20 rounded-lg text-white">
                       <GraduationCap size={16} />
                     </div>
                     <div>
-                      <h3 className="text-xs font-black text-slate-100">{getSchoolNameById(selectedSchool)}</h3>
-                      <p className="text-[9px] text-slate-400">专供校服精品选购通道</p>
+                      <h3 className="text-xs font-black text-white">{getSchoolNameById(selectedSchool)}</h3>
+                      <p className="text-[9px] text-blue-100">专供校服精品到店自助选购通道</p>
                     </div>
                   </div>
                   <button 
                     onClick={handleClearSchool}
-                    className="bg-blue-900/40 hover:bg-blue-800/40 text-blue-300 border border-blue-700/30 rounded-lg px-2.5 py-1 text-[9px] font-black transition-all cursor-pointer"
+                    className="bg-white/20 hover:bg-white/30 text-white border border-white/10 rounded-lg px-2.5 py-1 text-[9px] font-black transition-all cursor-pointer"
                   >
                     切换学校
                   </button>
                 </div>
 
                 {/* Navigation switch */}
-                <div className="grid grid-cols-2 gap-1.5 bg-slate-900/50 border border-slate-800/80 rounded-xl p-1 shrink-0">
+                <div className="grid grid-cols-2 gap-1.5 bg-slate-100 border border-slate-200 rounded-xl p-1 shrink-0">
                   <button
                     onClick={() => setActiveTab("catalog")}
-                    className={`py-2 text-[11px] font-extrabold rounded-lg transition-all ${
+                    className={`py-2 text-[11px] font-extrabold rounded-lg transition-all cursor-pointer ${
                       activeTab === "catalog" 
-                        ? "bg-gradient-to-r from-blue-800 to-indigo-900 text-white shadow-md font-black" 
-                        : "text-slate-400 hover:text-slate-200"
+                        ? "bg-white text-slate-800 shadow-xs font-black" 
+                        : "text-slate-500 hover:text-slate-800"
                     }`}
                   >
-                    校服预订 (Catalog)
+                    到店自助选购
                   </button>
                   <button
                     onClick={() => setActiveTab("queue")}
-                    className={`py-2 text-[11px] font-extrabold rounded-lg transition-all relative ${
+                    className={`py-2 text-[11px] font-extrabold rounded-lg transition-all cursor-pointer relative ${
                       activeTab === "queue" 
-                        ? "bg-gradient-to-r from-blue-800 to-indigo-900 text-white shadow-md font-black" 
-                        : "text-slate-400 hover:text-slate-200"
+                        ? "bg-white text-slate-800 shadow-xs font-black" 
+                        : "text-slate-500 hover:text-slate-800"
                     }`}
                   >
-                    <span>排队大屏 & 叫号</span>
+                    <span>我的排队叫号</span>
                     {myTicketId && (
                       <span className="absolute top-1.5 right-2 w-2 h-2 bg-red-500 rounded-full animate-pulse"></span>
                     )}
@@ -857,8 +1008,8 @@ export default function CustomerMiniProgram({
                   <div className="space-y-4">
                     
                     {/* Welcome school uniform notice */}
-                    <div className="text-[10px] text-slate-400 leading-relaxed bg-slate-900/30 p-2 rounded-xl border border-slate-900">
-                      💡 提示：本季提供【春秋季制服】及【夏季常服】的订购。如有货，正常下单后系统会自动为您分配<strong>【校服领取排队号码】</strong>，凭号到取件台领取试穿。若显示缺货，可进行缺货登记。
+                    <div className="text-[10px] text-slate-500 leading-relaxed bg-blue-50/50 p-2.5 rounded-xl border border-blue-100/50">
+                      💡 提示：本季提供【春秋季制服】及【夏季常服】的订购。正常下单后系统会自动为您分配<strong>【1号柜台校服发配排队号码】</strong>，凭号到柜台领取。若显示缺货，可登记手机号进行缺货登记。
                     </div>
 
                     {/* Grouped by categories */}
@@ -868,7 +1019,7 @@ export default function CustomerMiniProgram({
 
                       return (
                         <div key={category} className="space-y-2">
-                          <h4 className="text-[10px] font-extrabold text-blue-400 border-l-2 border-blue-500 pl-1.5 py-0.5 tracking-widest uppercase">
+                          <h4 className="text-[10px] font-extrabold text-slate-800 border-l-2 border-blue-600 pl-1.5 py-0.5 tracking-widest uppercase">
                             {category}
                           </h4>
                           <div className="space-y-2.5">
@@ -877,16 +1028,16 @@ export default function CustomerMiniProgram({
                               return (
                                 <div 
                                   key={item.id} 
-                                  className="bg-[#0e1428] border border-blue-950/60 rounded-xl p-3 shadow-inner flex flex-col justify-between gap-2.5 hover:border-blue-950 transition-all"
+                                  className="bg-white border border-slate-200/80 hover:border-blue-300 rounded-xl p-3 shadow-xs flex flex-col justify-between gap-2.5 transition-all text-slate-800"
                                 >
                                   <div className="flex items-start justify-between">
                                     <div className="space-y-1">
-                                      <span className="text-xs font-black text-slate-100 block">
+                                      <span className="text-xs font-black text-slate-800 block">
                                         {item.name}
                                       </span>
                                       <div className="flex items-center space-x-2">
-                                        <span className="text-xs font-extrabold text-blue-400">¥{item.price}</span>
-                                        <span className="text-[9px] text-slate-400">
+                                        <span className="text-xs font-extrabold text-blue-600">¥{item.price}</span>
+                                        <span className="text-[9px] text-slate-500">
                                           ({item.skus.length}个尺码可选)
                                         </span>
                                       </div>
@@ -894,30 +1045,30 @@ export default function CustomerMiniProgram({
                                     
                                     {/* Combined stock status badges */}
                                     {totalStock === 0 ? (
-                                      <span className="text-[8px] bg-red-950/40 text-red-400 px-2 py-0.5 rounded border border-red-900/30 font-extrabold">
+                                      <span className="text-[8px] bg-red-50 text-red-600 px-2 py-0.5 rounded border border-red-200 font-extrabold">
                                         已售罄
                                       </span>
                                     ) : totalStock < 8 ? (
-                                      <span className="text-[8px] bg-amber-950/40 text-amber-400 px-2 py-0.5 rounded border border-amber-900/30 animate-pulse font-extrabold">
+                                      <span className="text-[8px] bg-amber-50 text-amber-600 px-2 py-0.5 rounded border border-amber-200 animate-pulse font-extrabold">
                                         余量紧张
                                       </span>
                                     ) : (
-                                      <span className="text-[8px] bg-emerald-950/40 text-emerald-400 px-2 py-0.5 rounded border border-emerald-900/30 font-extrabold">
+                                      <span className="text-[8px] bg-emerald-50 text-emerald-600 px-2 py-0.5 rounded border border-emerald-200 font-extrabold">
                                         现货充足
                                       </span>
                                     )}
                                   </div>
 
                                   {/* Action selectors */}
-                                  <div className="flex items-center justify-between pt-1 border-t border-slate-900">
-                                    <div className="text-[9px] text-slate-500">
+                                  <div className="flex items-center justify-between pt-1 border-t border-slate-100">
+                                    <div className="text-[9px] text-slate-400">
                                       包含尺码：{item.skus.map(s => s.size).join(", ")}
                                     </div>
                                     <button
                                       onClick={() => openSkuModal(item)}
-                                      className="bg-gradient-to-r from-blue-700 to-indigo-800 hover:from-blue-600 hover:to-indigo-700 text-white font-extrabold py-1 px-3 rounded-lg text-[10px] transition-all flex items-center space-x-0.5 shadow-md cursor-pointer"
+                                      className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-extrabold py-1 px-3 rounded-lg text-[10px] transition-all flex items-center space-x-0.5 shadow-xs cursor-pointer"
                                     >
-                                      <span>选规格下单</span>
+                                      <span>选规格配货</span>
                                       <ChevronRight size={10} />
                                     </button>
                                   </div>
@@ -934,18 +1085,18 @@ export default function CustomerMiniProgram({
                       <motion.div 
                         initial={{ opacity: 0, y: 50 }} 
                         animate={{ opacity: 1, y: 0 }}
-                        className="bg-slate-900 border border-blue-900/30 rounded-2xl p-3.5 flex items-center justify-between shadow-lg sticky bottom-2"
+                        className="bg-white border border-slate-200 rounded-2xl p-3.5 flex items-center justify-between shadow-lg sticky bottom-2 text-slate-800"
                       >
                         <div className="flex items-center space-x-2.5">
-                          <div className="w-10 h-10 bg-blue-950 border border-blue-800 rounded-xl flex items-center justify-center text-blue-400 relative">
+                          <div className="w-10 h-10 bg-blue-50 border border-blue-200 rounded-xl flex items-center justify-center text-blue-600 relative">
                             <ShoppingCart size={18} />
-                            <span className="absolute -top-1.5 -right-1.5 bg-red-600 text-white text-[9px] font-black w-4.5 h-4.5 rounded-full flex items-center justify-center">
+                            <span className="absolute -top-1.5 -right-1.5 bg-red-500 text-white text-[9px] font-black w-4.5 h-4.5 rounded-full flex items-center justify-center">
                               {cart.reduce((sum, item) => sum + item.quantity, 0)}
                             </span>
                           </div>
                           <div>
-                            <span className="text-[11px] text-slate-100 font-extrabold block">已选校服成衣</span>
-                            <span className="text-[10px] text-blue-400 font-bold block">
+                            <span className="text-[11px] text-slate-800 font-extrabold block">已选配货校服</span>
+                            <span className="text-[10px] text-blue-600 font-bold block">
                               总计 ¥{cart.reduce((sum, item) => sum + (item.product.price * item.quantity), 0)}
                             </span>
                           </div>
@@ -955,9 +1106,9 @@ export default function CustomerMiniProgram({
                             setCheckoutPhone("");
                             setShowCheckoutModal(true);
                           }}
-                          className="bg-gradient-to-r from-green-700 to-emerald-800 hover:from-green-600 hover:to-emerald-700 text-white font-black py-1.5 px-4 rounded-xl text-xs shadow-md transition-all cursor-pointer"
+                          className="bg-gradient-to-r from-green-600 to-emerald-600 hover:from-green-500 hover:to-emerald-500 text-white font-black py-1.5 px-4 rounded-xl text-xs shadow-md transition-all cursor-pointer"
                         >
-                          立即结算下单
+                          立即自助下单
                         </button>
                       </motion.div>
                     )}
@@ -965,64 +1116,64 @@ export default function CustomerMiniProgram({
                   </div>
                 ) : (
                   /* ==================== TAB: QUEUE (叫号大屏 & 个人排号卡) ==================== */
-                  <div className="space-y-4">
+                  <div className="space-y-4 text-slate-800">
                     
                     {/* Active Queue Ticket (PERSISTED & POLLED REAL-TIME) */}
                     {myTicketId && myTicketDetail ? (
                       <motion.div 
                         initial={{ opacity: 0, scale: 0.95 }} 
                         animate={{ opacity: 1, scale: 1 }}
-                        className="bg-gradient-to-br from-[#0c132c] via-[#0f193a] to-[#0c132c] rounded-2xl p-5 border border-blue-500/30 shadow-md space-y-4 relative overflow-hidden"
+                        className="bg-white rounded-2xl p-5 border border-slate-200 shadow-xs space-y-4 relative overflow-hidden"
                       >
                         {/* Live calling notice */}
                         {myTicketDetail.ticket.status === "called" && (
-                          <div className="absolute right-0 top-0 bg-red-600 text-white text-[9px] px-3 py-1 rounded-bl-xl font-black flex items-center space-x-1.5 animate-pulse uppercase tracking-wider">
+                          <div className="absolute right-0 top-0 bg-red-500 text-white text-[9px] px-3 py-1 rounded-bl-xl font-black flex items-center space-x-1.5 animate-pulse uppercase tracking-wider">
                             <Volume2 size={11} className="animate-bounce" />
                             <span>正在呼叫 请前往柜台</span>
                           </div>
                         )}
                         {myTicketDetail.ticket.status === "waiting" && (
-                          <div className="absolute right-0 top-0 bg-blue-600 text-white text-[9px] px-3 py-1 rounded-bl-xl font-black">
+                          <div className="absolute right-0 top-0 bg-blue-500 text-white text-[9px] px-3 py-1 rounded-bl-xl font-black">
                             <span>排队候补中</span>
                           </div>
                         )}
                         {myTicketDetail.ticket.status === "completed" && (
-                          <div className="absolute right-0 top-0 bg-slate-700 text-slate-300 text-[9px] px-3 py-1 rounded-bl-xl font-black">
+                          <div className="absolute right-0 top-0 bg-slate-400 text-white text-[9px] px-3 py-1 rounded-bl-xl font-black">
                             <span>领取服务完成</span>
                           </div>
                         )}
                         {myTicketDetail.ticket.status === "skipped" && (
-                          <div className="absolute right-0 top-0 bg-amber-600 text-white text-[9px] px-3 py-1 rounded-bl-xl font-black">
+                          <div className="absolute right-0 top-0 bg-amber-500 text-white text-[9px] px-3 py-1 rounded-bl-xl font-black">
                             <span>号码已过号</span>
                           </div>
                         )}
 
-                        <div className="text-center pb-1">
+                        <div className="text-center pb-1 pt-2">
                           <span className="text-[10px] text-slate-400 font-extrabold uppercase tracking-widest block">
-                            您当前的排队号码 (再次扫码也显示)
+                            您当前的排队号码 (再次扫码自动开)
                           </span>
-                          <h1 className="text-4xl font-black text-white tracking-widest mt-1.5 font-mono text-shadow-blue">
+                          <h1 className="text-4xl font-black text-slate-800 tracking-widest mt-1.5 font-mono">
                             {myTicketDetail.ticket.number}
                           </h1>
-                          <div className="inline-flex items-center space-x-1 bg-blue-950 border border-blue-900/40 px-3 py-0.5 rounded-full mt-2">
-                            {getQueueIcon(myTicketDetail.ticket.type, "w-3 h-3 text-blue-400")}
-                            <span className="text-[10px] text-blue-300 font-bold">
-                              {getQueueName(myTicketDetail.ticket.type).split(" ")[0]}
+                          <div className="inline-flex items-center space-x-1 bg-blue-50 border border-blue-100 px-3 py-0.5 rounded-full mt-2">
+                            {getQueueIcon(myTicketDetail.ticket.type, "w-3 h-3 text-blue-600")}
+                            <span className="text-[10px] text-blue-600 font-bold">
+                              1号柜台·配货领取 (Pickup)
                             </span>
                           </div>
                         </div>
 
                         {/* Position information */}
-                        <div className="grid grid-cols-2 gap-2 bg-[#080d1a] p-3 rounded-xl border border-blue-950/60">
-                          <div className="text-center border-r border-slate-900">
-                            <span className="text-[10px] text-slate-400 block font-bold">前方还需等候</span>
-                            <span className="text-lg font-black text-blue-400 block mt-0.5 font-mono">
+                        <div className="grid grid-cols-2 gap-2 bg-slate-50 p-3 rounded-xl border border-slate-100">
+                          <div className="text-center border-r border-slate-200">
+                            <span className="text-[10px] text-slate-500 block font-bold">前方还需等候</span>
+                            <span className="text-lg font-black text-blue-600 block mt-0.5 font-mono">
                               {myTicketDetail.ticket.status === "waiting" ? `${myTicketDetail.ahead} 人` : "0 人"}
                             </span>
                           </div>
                           <div className="text-center">
-                            <span className="text-[10px] text-slate-400 block font-bold">预计等候时间</span>
-                            <span className="text-lg font-black text-slate-200 block mt-0.5 font-mono">
+                            <span className="text-[10px] text-slate-500 block font-bold">预计等候时间</span>
+                            <span className="text-lg font-black text-slate-700 block mt-0.5 font-mono">
                               {myTicketDetail.ticket.status === "waiting" ? `~${myTicketDetail.estimatedWaitMinutes} 分钟` : "请前往柜台"}
                             </span>
                           </div>
@@ -1030,10 +1181,10 @@ export default function CustomerMiniProgram({
 
                         {/* Order contents block if ordered */}
                         {myTicketDetail.ticket.orderedItems && myTicketDetail.ticket.orderedItems.length > 0 && (
-                          <div className="bg-blue-950/40 border border-blue-900/20 rounded-xl p-2.5 space-y-1 text-[10px]">
-                            <span className="text-slate-400 font-bold block mb-1">配货校服成衣清单：</span>
+                          <div className="bg-slate-50 border border-slate-150 rounded-xl p-2.5 space-y-1 text-[10px] text-slate-700">
+                            <span className="text-slate-800 font-bold block mb-1">已配货校服清单：</span>
                             {myTicketDetail.ticket.orderedItems.map((it: any, index: number) => (
-                              <div key={index} className="flex justify-between text-slate-300 font-mono">
+                              <div key={index} className="flex justify-between text-slate-600 font-mono">
                                 <span>• {it.name} ({it.size}码)</span>
                                 <span>x{it.quantity} 件</span>
                               </div>
@@ -1042,55 +1193,66 @@ export default function CustomerMiniProgram({
                         )}
 
                         {/* Alert notification text based on ticket status */}
-                        <div className="border-t border-dashed border-slate-900 pt-3 text-center">
+                        <div className="border-t border-dashed border-slate-200 pt-3 text-center">
                           {myTicketDetail.ticket.status === "waiting" && (
-                            <p className="text-[10px] text-slate-400 leading-relaxed px-1">
-                              📢 目前取件台正呼叫 <span className="font-extrabold text-blue-400 font-mono">{myTicketDetail.currentCalled}</span>。配货组老师正在加急核实校服款型并开包折叠，叫到后请前往柜台。
+                            <p className="text-[10px] text-slate-500 leading-relaxed px-1">
+                              📢 目前1号柜台正呼叫 <span className="font-extrabold text-blue-600 font-mono">{myTicketDetail.currentCalled}</span>。配货组老师正在加急核实校服款型并开包，叫到后请前往1号柜台。
                             </p>
                           )}
                           {myTicketDetail.ticket.status === "called" && (
-                            <div className="text-red-400 font-black px-1 space-y-1 animate-pulse">
-                              <p className="text-xs">✨ 请携带手机至「1号或2号取包台」！</p>
-                              <p className="text-[9.5px] text-slate-300 font-normal">您的校服包裹已经打包完毕，可以试穿或带走。</p>
+                            <div className="text-red-500 font-black px-1 space-y-1 animate-pulse">
+                              <p className="text-xs">✨ 请携带手机至「1号配货柜台」！</p>
+                              <p className="text-[9.5px] text-slate-600 font-normal">您的校服包裹已经准备妥当，可以前往试穿或带走。</p>
                             </div>
                           )}
                           {myTicketDetail.ticket.status === "completed" && (
-                            <p className="text-emerald-400 font-black py-0.5 text-[10px]">
-                              🎉 领包完成！如有不合身可重新取【尺寸调换】号办理。
+                            <p className="text-emerald-600 font-black py-0.5 text-[10px]">
+                              🎉 领包完成！感谢您自助订购。如有其他购买需求，可直接点击下方再下一单。
                             </p>
                           )}
                           {myTicketDetail.ticket.status === "skipped" && (
-                            <p className="text-amber-500 font-black py-0.5 text-[10px] px-1 leading-relaxed">
-                              ⚠️ 抱歉，因连续呼叫超时您已被过号。如需再次领取，请向现场服务老师咨询恢复。
+                            <p className="text-amber-600 font-black py-0.5 text-[10px] px-1 leading-relaxed">
+                              ⚠️ 抱歉，因连续呼叫超时您已被过号。如需再次领取，请向现场服务老师咨询。
                             </p>
                           )}
                           
-                          <div className="flex justify-between items-center text-[8px] text-slate-500 font-mono mt-3 px-1">
+                          <div className="flex justify-between items-center text-[8px] text-slate-400 font-mono mt-3 px-1">
                             <span>所属学校: {myTicketDetail.ticket.schoolName || getSchoolNameById(selectedSchool)}</span>
                             <span>取号: {new Date(myTicketDetail.ticket.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' })}</span>
                           </div>
                         </div>
 
                         {/* Controls */}
-                        <div className="grid grid-cols-2 gap-2 pt-1">
+                        <div className="space-y-2 pt-1">
+                          {/* "再下一单" Button for active tickets */}
                           <button
-                            onClick={onRefreshQueue}
-                            className="flex items-center justify-center space-x-1.5 bg-slate-900 hover:bg-slate-800 text-slate-200 py-2 rounded-xl text-xs font-semibold border border-slate-800 transition-colors"
+                            onClick={handleOrderAnother}
+                            className="w-full flex items-center justify-center space-x-1.5 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white py-2 rounded-xl text-xs font-black shadow-xs cursor-pointer"
                           >
-                            <RefreshCw size={12} className="animate-spin-slow text-blue-400" />
-                            <span>手动刷新进度</span>
+                            <ShoppingCart size={13} />
+                            <span>再下一单 (购买其他尺码或配货)</span>
                           </button>
-                          <button
-                            onClick={handleCancelTicket}
-                            className="bg-red-950/20 hover:bg-red-950/40 text-red-400 hover:text-red-300 py-2 rounded-xl text-xs font-semibold border border-red-900/30 transition-colors"
-                          >
-                            <span>放弃排号</span>
-                          </button>
+
+                          <div className="grid grid-cols-2 gap-2">
+                            <button
+                              onClick={onRefreshQueue}
+                              className="flex items-center justify-center space-x-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 py-2 rounded-xl text-xs font-semibold border border-slate-200 transition-colors cursor-pointer"
+                            >
+                              <RefreshCw size={12} className="animate-spin-slow text-blue-500" />
+                              <span>手动刷新进度</span>
+                            </button>
+                            <button
+                              onClick={handleCancelTicket}
+                              className="bg-red-50 hover:bg-red-100 text-red-600 py-2 rounded-xl text-xs font-semibold border border-red-200 transition-colors cursor-pointer"
+                            >
+                              <span>放弃排号</span>
+                            </button>
+                          </div>
                         </div>
 
                         {/* Escaping to switch school/buy for another kid */}
-                        <div className="bg-[#050914] p-2.5 rounded-xl border border-blue-950/40 text-center space-y-1">
-                          <p className="text-[9px] text-slate-500">
+                        <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200 text-center space-y-1">
+                          <p className="text-[9px] text-slate-400">
                             需要为其他孩子下单，或想解除绑定重新关联学校？
                           </p>
                           <div className="flex justify-center space-x-3.5">
@@ -1099,116 +1261,148 @@ export default function CustomerMiniProgram({
                               onClick={() => {
                                 setSelectedSchool(null);
                               }}
-                              className="text-[9.5px] text-blue-400 hover:text-blue-300 font-extrabold underline cursor-pointer"
+                              className="text-[9.5px] text-blue-600 hover:text-blue-700 font-extrabold underline cursor-pointer"
                             >
                               切换学校 / 重新关联
                             </button>
-                            <span className="text-slate-800 text-[10px] select-none">•</span>
+                            <span className="text-slate-300 text-[10px] select-none">•</span>
                             <button
                               type="button"
                               onClick={() => {
                                 setActiveTab("catalog");
                               }}
-                              className="text-[9.5px] text-blue-400 hover:text-blue-300 font-extrabold underline cursor-pointer"
+                              className="text-[9.5px] text-blue-600 hover:text-blue-700 font-extrabold underline cursor-pointer"
                             >
-                              返回商品专柜
+                              返回商品专区
                             </button>
                           </div>
                         </div>
                       </motion.div>
                     ) : (
-                      /* If no active ticket, explain how to get a manual queue if they just need help without ordering */
-                      <div className="bg-slate-900/50 rounded-2xl p-4 border border-slate-900 text-center space-y-3.5">
+                      /* If no active ticket, direct user to place order directly */
+                      <div className="bg-white rounded-2xl p-4 border border-slate-200 text-center space-y-3.5 shadow-xs">
                         <div className="py-2 flex flex-col items-center">
-                          <div className="w-10 h-10 bg-slate-950 text-slate-300 rounded-full flex items-center justify-center border border-slate-800 mb-2">
-                            <QrCode size={18} className="text-blue-400 animate-pulse" />
+                          <div className="w-10 h-10 bg-slate-50 text-slate-400 rounded-full flex items-center justify-center border border-slate-200 mb-2 shadow-xs">
+                            <QrCode size={18} className="text-blue-600 animate-pulse" />
                           </div>
-                          <h3 className="text-xs font-extrabold text-slate-200">
-                            您尚未获取排号
+                          <h3 className="text-xs font-extrabold text-slate-800">
+                            您尚未获取配货排号
                           </h3>
-                          <p className="text-[10px] text-slate-400 mt-1 max-w-[240px] leading-relaxed">
-                            如有购买现货，下单后会自动分配领取号码。如果您只需办理<strong>“尺寸调换/修改”</strong>或<strong>“现场人工收银结算”</strong>，可直接在下方自助拉取等候号码：
+                          <p className="text-[10px] text-slate-500 mt-1 max-w-[240px] leading-relaxed">
+                            如有购买校服，请先在下方<b>「到店自助选购」</b>中选择所需的款式与尺寸，自助下单即可自动为您分配1号柜台的排号。
                           </p>
                         </div>
 
-                        {/* Queue list selections */}
-                        <div className="grid grid-cols-2 gap-2">
-                          <button
-                            onClick={() => {
-                              setManualTicketType("A");
-                              setManualPhone("");
-                              setShowManualTicketModal(true);
-                            }}
-                            className="bg-[#0e1428] border border-blue-900/20 rounded-xl p-3 flex flex-col items-center justify-center text-center hover:border-blue-500/40 transition-all cursor-pointer group"
-                          >
-                            <Scissors className="w-4 h-4 text-indigo-400 mb-1 group-hover:scale-105 transition-transform" />
-                            <span className="text-[11px] font-extrabold text-slate-100">尺寸修改与调换</span>
-                            <span className="text-[8px] text-slate-500 mt-0.5">
-                              排队 {queueStatus?.waitingCount.A || 0} 人
-                            </span>
-                          </button>
-                          <button
-                            onClick={() => {
-                              setManualTicketType("C");
-                              setManualPhone("");
-                              setShowManualTicketModal(true);
-                            }}
-                            className="bg-[#0e1428] border border-blue-900/20 rounded-xl p-3 flex flex-col items-center justify-center text-center hover:border-blue-500/40 transition-all cursor-pointer group"
-                          >
-                            <CreditCard className="w-4 h-4 text-sky-400 mb-1 group-hover:scale-105 transition-transform" />
-                            <span className="text-[11px] font-extrabold text-slate-100">现场结算与收银</span>
-                            <span className="text-[8px] text-slate-500 mt-0.5">
-                              排队 {queueStatus?.waitingCount.C || 0} 人
-                            </span>
-                          </button>
-                        </div>
+                        <button
+                          onClick={() => setActiveTab("catalog")}
+                          className="w-full bg-blue-600 hover:bg-blue-500 text-white text-xs font-black py-2 rounded-xl shadow-xs transition-all cursor-pointer"
+                        >
+                          前往选规格下单
+                        </button>
                       </div>
                     )}
 
+                    {/* QR SCAN HISTORY SECTION (Design for scanning again to see history) */}
+                    <div className="bg-white border border-slate-200 rounded-2xl p-4 shadow-xs space-y-2.5 text-left">
+                      <div className="flex items-center space-x-1.5 border-b border-slate-100 pb-2">
+                        <History size={13} className="text-blue-600" />
+                        <span className="text-[10px] font-black tracking-wider text-slate-700 uppercase">
+                          智能扫码历史排号记录
+                        </span>
+                      </div>
+                      
+                      {historyTickets.length === 0 ? (
+                        <p className="text-[9px] text-slate-400 italic text-center py-2">
+                          暂无历史下单记录，在门店下单后将自动在此保存。
+                        </p>
+                      ) : (
+                        <div className="space-y-2 max-h-[140px] overflow-y-auto pr-1 scrollbar-thin">
+                          {historyTickets.map((tk) => {
+                            const isCurrent = tk.id === myTicketId;
+                            return (
+                              <div 
+                                key={tk.id}
+                                className={`border rounded-xl p-2.5 flex items-center justify-between transition-all ${
+                                  isCurrent 
+                                    ? "bg-blue-50/50 border-blue-200 shadow-xs" 
+                                    : "bg-slate-50 border-slate-150 hover:bg-slate-100/50"
+                                }`}
+                              >
+                                <div className="space-y-0.5 max-w-[70%]">
+                                  <div className="flex items-center space-x-1.5">
+                                    <span className="text-[11px] font-extrabold font-mono text-slate-800">
+                                      号码: {tk.number}
+                                    </span>
+                                    <span className="text-[8px] bg-slate-200/60 text-slate-500 px-1 rounded font-sans font-medium">
+                                      {tk.schoolName || "合作学校"}
+                                    </span>
+                                  </div>
+                                  <p className="text-[9px] text-slate-500 truncate">
+                                    {tk.orderedItems && tk.orderedItems.length > 0 
+                                      ? tk.orderedItems.map((it: any) => `${it.name}(${it.size})`).join(", ")
+                                      : "自助取号"
+                                    }
+                                  </p>
+                                  <span className="text-[7.5px] text-slate-400 block font-mono">
+                                    {new Date(tk.timestamp).toLocaleString([], { month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit" })}
+                                  </span>
+                                </div>
+
+                                <div className="flex flex-col items-end space-y-1">
+                                  <span className={`text-[8px] px-1.5 py-0.5 rounded font-black uppercase ${
+                                    tk.status === "called" ? "bg-red-50 text-red-600 border border-red-100" :
+                                    tk.status === "waiting" ? "bg-blue-50 text-blue-600 border border-blue-100" :
+                                    tk.status === "completed" ? "bg-slate-200 text-slate-600" :
+                                    "bg-amber-50 text-amber-600 border border-amber-100"
+                                  }`}>
+                                    {tk.status === "called" ? "叫号中" :
+                                     tk.status === "waiting" ? "等待中" :
+                                     tk.status === "completed" ? "已完成" : "已过号"}
+                                  </span>
+
+                                  {!isCurrent && (
+                                    <button
+                                      onClick={() => handleReactivateTicket(tk.id)}
+                                      className="text-[8.5px] text-blue-600 hover:underline font-extrabold cursor-pointer"
+                                    >
+                                      追踪此单进度 →
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
                     {/* Central live queue screen display board */}
-                    <div className="bg-slate-900/80 rounded-2xl p-4 border border-slate-800 shadow-md space-y-3">
-                      <div className="flex justify-between items-center border-b border-slate-800 pb-2">
-                        <span className="text-[11px] font-extrabold text-slate-100 flex items-center space-x-1 uppercase tracking-wider">
-                          <Users size={12} className="text-blue-400" />
-                          <span>门店服务窗口呼叫大屏</span>
+                    <div className="bg-white rounded-2xl p-4 border border-slate-200 shadow-xs space-y-3">
+                      <div className="flex justify-between items-center border-b border-slate-150 pb-2">
+                        <span className="text-[11px] font-extrabold text-slate-800 flex items-center space-x-1 uppercase tracking-wider">
+                          <Users size={12} className="text-blue-600" />
+                          <span>1号柜台·领包服务呼叫屏</span>
                         </span>
                         <button 
                           onClick={onRefreshQueue}
-                          className="text-[10px] text-blue-400 hover:text-blue-300 flex items-center space-x-0.5 cursor-pointer"
+                          className="text-[10px] text-blue-600 hover:text-blue-700 flex items-center space-x-0.5 cursor-pointer"
                         >
                           <RefreshCw size={10} />
                           <span>同步进度</span>
                         </button>
                       </div>
 
-                      <div className="grid grid-cols-3 gap-2">
-                        <div className="bg-[#0b101f] p-2.5 rounded-xl text-center border border-blue-950/40">
-                          <span className="text-[9px] text-slate-400 block font-bold">校服领取 U</span>
-                          <div className="text-base font-black text-blue-400 font-mono mt-0.5 text-shadow-blue">
-                            {queueStatus?.currentCalled.U || "无"}
-                          </div>
-                          <span className="text-[8px] text-slate-500 block mt-0.5 font-medium">
-                            {queueStatus?.waitingCount.U || 0}人等候
-                          </span>
+                      {/* Display U Counter ONLY - Hide Alteration (A) and Cashier (C) from Simulator screen */}
+                      <div className="bg-slate-50 border border-slate-150 p-4 rounded-xl text-center max-w-xs mx-auto">
+                        <span className="text-[10px] text-slate-500 block font-black uppercase tracking-wider">
+                          1号配货发件柜台 (U)
+                        </span>
+                        <div className="text-3xl font-black text-blue-600 font-mono mt-1 animate-pulse">
+                          {queueStatus?.currentCalled.U || "无"}
                         </div>
-                        <div className="bg-[#0b101f] p-2.5 rounded-xl text-center border border-blue-950/40">
-                          <span className="text-[9px] text-slate-400 block font-bold">尺码修改 A</span>
-                          <div className="text-base font-black text-indigo-400 font-mono mt-0.5 text-shadow-blue">
-                            {queueStatus?.currentCalled.A || "无"}
-                          </div>
-                          <span className="text-[8px] text-slate-500 block mt-0.5 font-medium">
-                            {queueStatus?.waitingCount.A || 0}人等候
-                          </span>
-                        </div>
-                        <div className="bg-[#0b101f] p-2.5 rounded-xl text-center border border-blue-950/40">
-                          <span className="text-[9px] text-slate-400 block font-bold">收银开单 C</span>
-                          <div className="text-base font-black text-sky-400 font-mono mt-0.5 text-shadow-blue">
-                            {queueStatus?.currentCalled.C || "无"}
-                          </div>
-                          <span className="text-[8px] text-slate-500 block mt-0.5 font-medium">
-                            {queueStatus?.waitingCount.C || 0}人等候
-                          </span>
-                        </div>
+                        <span className="text-[9px] text-slate-400 block mt-1.5 font-medium">
+                          当前队列共 {queueStatus?.waitingCount.U || 0} 人等候
+                        </span>
                       </div>
                     </div>
 
@@ -1222,24 +1416,24 @@ export default function CustomerMiniProgram({
 
           {/* D. WeChat Navigation Bottom Bar */}
           {selectedSchool && (
-            <div className="absolute bottom-0 left-0 right-0 h-16 bg-[#0c1122] border-t border-slate-900 flex items-center justify-around px-4 z-20 shrink-0 shadow-lg">
+            <div className="absolute bottom-0 left-0 right-0 h-16 bg-white border-t border-slate-200 flex items-center justify-around px-4 z-20 shrink-0 shadow-lg text-slate-800">
               <button
                 onClick={() => setActiveTab("catalog")}
                 className={`flex flex-col items-center justify-center space-y-1 cursor-pointer transition-colors ${
-                  activeTab === "catalog" ? "text-blue-400 font-extrabold" : "text-slate-500 hover:text-slate-400"
+                  activeTab === "catalog" ? "text-blue-600 font-extrabold" : "text-slate-400 hover:text-slate-600"
                 }`}
               >
                 <ShoppingBag size={18} />
-                <span className="text-[9px]">校服商城</span>
+                <span className="text-[9px]">自助选购</span>
               </button>
               <button
                 onClick={() => setActiveTab("queue")}
                 className={`flex flex-col items-center justify-center space-y-1 cursor-pointer transition-colors ${
-                  activeTab === "queue" ? "text-blue-400 font-extrabold" : "text-slate-500 hover:text-slate-400"
+                  activeTab === "queue" ? "text-blue-600 font-extrabold" : "text-slate-400 hover:text-slate-600"
                 }`}
               >
                 <Users size={18} />
-                <span className="text-[9px]">排队进度</span>
+                <span className="text-[9px]">排队叫号</span>
               </button>
             </div>
           )}
@@ -1253,29 +1447,29 @@ export default function CustomerMiniProgram({
                 initial={{ opacity: 0 }} 
                 animate={{ opacity: 1 }} 
                 exit={{ opacity: 0 }}
-                className="absolute inset-0 bg-black/80 z-30 flex items-end"
+                className="absolute inset-0 bg-black/60 z-30 flex items-end"
               >
                 <motion.div 
                   initial={{ y: "100%" }} 
                   animate={{ y: 0 }} 
                   exit={{ y: "100%" }}
                   transition={{ type: "spring", damping: 25, stiffness: 200 }}
-                  className="bg-[#0f152b] w-full rounded-t-3xl p-5 pb-8 space-y-4 max-h-[88%] border-t border-blue-900/40 overflow-y-auto"
+                  className="bg-white w-full rounded-t-3xl p-5 pb-8 space-y-4 max-h-[88%] border-t border-slate-200 overflow-y-auto text-slate-800 shadow-xl"
                 >
                   {/* SKU Header */}
-                  <div className="flex justify-between items-start border-b border-slate-900 pb-3">
+                  <div className="flex justify-between items-start border-b border-slate-100 pb-3">
                     <div className="space-y-0.5">
-                      <span className="text-[9px] bg-blue-900/30 text-blue-300 font-extrabold px-1.5 py-0.5 rounded border border-blue-800/20 uppercase tracking-widest block w-fit">
+                      <span className="text-[9px] bg-blue-50 text-blue-600 font-extrabold px-1.5 py-0.5 rounded border border-blue-100 uppercase tracking-widest block w-fit">
                         {getSchoolNameById(selectedSchool)}
                       </span>
-                      <h4 className="text-xs font-black text-slate-100 mt-1">
+                      <h4 className="text-xs font-black text-slate-800 mt-1">
                         {selectedProduct.name}
                       </h4>
-                      <p className="text-[11px] font-black text-blue-400">¥{selectedProduct.price}</p>
+                      <p className="text-[11px] font-black text-blue-600">¥{selectedProduct.price}</p>
                     </div>
                     <button 
                       onClick={() => setShowSkuModal(false)}
-                      className="text-[10px] text-slate-400 hover:text-slate-200 bg-slate-900 w-6 h-6 rounded-full flex items-center justify-center font-extrabold cursor-pointer"
+                      className="text-[10px] text-slate-400 hover:text-slate-600 bg-slate-100 w-6 h-6 rounded-full flex items-center justify-center font-extrabold cursor-pointer"
                     >
                       ✕
                     </button>
@@ -1287,11 +1481,11 @@ export default function CustomerMiniProgram({
                       animate={{ opacity: 1, scale: 1 }}
                       className="py-8 flex flex-col items-center text-center space-y-3"
                     >
-                      <div className="w-12 h-12 bg-emerald-950/50 text-emerald-400 rounded-full flex items-center justify-center border border-emerald-500/30">
+                      <div className="w-12 h-12 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center border border-emerald-100">
                         <CheckCircle size={24} className="animate-bounce" />
                       </div>
-                      <h4 className="text-xs font-black text-white">缺货登记提交成功！</h4>
-                      <p className="text-[10px] text-slate-400 max-w-[240px] leading-relaxed">
+                      <h4 className="text-xs font-black text-slate-800">缺货登记提交成功！</h4>
+                      <p className="text-[10px] text-slate-500 max-w-[240px] leading-relaxed">
                         您的求购信息已即时直达 【缪斯门店库房/采购端】，我们将尽快进行调货！调货成功后将自动通过手机号进行通知！
                       </p>
                     </motion.div>
@@ -1300,7 +1494,7 @@ export default function CustomerMiniProgram({
                       
                       {/* Out of stock mode prompt sticker */}
                       {isOutOfStockMode && (
-                        <div className="bg-red-950/30 border border-red-500/20 p-2.5 rounded-xl flex items-start space-x-2 text-[10px] text-red-400">
+                        <div className="bg-red-50 border border-red-100 p-2.5 rounded-xl flex items-start space-x-2 text-[10px] text-red-600">
                           <AlertTriangle size={13} className="shrink-0 mt-0.5 text-red-500" />
                           <p className="leading-relaxed">
                             <strong>您已开启“缺货登记”模式</strong>：请在下方选择需要的缺货尺码并输入手机号。系统将单独汇总向店长发出加急采购强提醒。
@@ -1311,7 +1505,7 @@ export default function CustomerMiniProgram({
                       {/* SKU Size Select chips */}
                       <div className="space-y-1.5">
                         <div className="flex justify-between items-center">
-                          <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+                          <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest">
                             {isOutOfStockMode ? "选择需要登记的尺码" : "选择校服尺码"}
                           </label>
                           {!isOutOfStockMode && (
@@ -1321,7 +1515,7 @@ export default function CustomerMiniProgram({
                                 setIsOutOfStockMode(true);
                                 setSkuQuantity(1);
                               }}
-                              className="text-[10px] text-red-400 hover:text-red-300 font-extrabold flex items-center space-x-0.5 cursor-pointer"
+                              className="text-[10px] text-red-500 hover:text-red-600 font-extrabold flex items-center space-x-0.5 cursor-pointer"
                             >
                               <AlertTriangle size={10} />
                               <span>缺货尺码登记入口</span>
@@ -1341,13 +1535,13 @@ export default function CustomerMiniProgram({
                                 className={`rounded-xl p-2.5 text-center relative transition-all border ${
                                   isOutOfStockMode
                                     ? isSelected
-                                      ? "border-red-500 bg-red-950/30 text-red-300"
-                                      : "border-slate-800 bg-slate-900/40 text-slate-400 hover:border-slate-700"
+                                      ? "border-red-500 bg-red-50 text-red-600"
+                                      : "border-slate-200 bg-slate-50 text-slate-500 hover:border-slate-300"
                                     : isSelected
-                                      ? "border-blue-500 bg-blue-950/40 text-blue-300 font-black"
+                                      ? "border-blue-500 bg-blue-50 text-blue-600 font-black"
                                       : isSoldOut
-                                        ? "border-slate-900 bg-slate-950/20 text-slate-600 cursor-not-allowed"
-                                        : "border-slate-850 bg-slate-900/60 text-slate-300 hover:border-slate-700"
+                                        ? "border-slate-100 bg-slate-50 text-slate-300 cursor-not-allowed"
+                                        : "border-slate-200 bg-white text-slate-700 hover:border-slate-300"
                                 }`}
                               >
                                 <span className="text-xs block font-mono">{sku.size}</span>
@@ -1355,9 +1549,9 @@ export default function CustomerMiniProgram({
                                   {isOutOfStockMode ? "登记款式" : isSoldOut ? "无货" : `库存: ${sku.stock}`}
                                 </span>
 
-                                {/* Corner "OutOfStock" badge (CRITICAL REQUIREMENT) */}
+                                {/* Corner "OutOfStock" badge */}
                                 {isOutOfStockMode && (
-                                  <span className="absolute -top-1 -right-1 bg-red-600 text-white font-extrabold text-[7px] px-1 py-0.2 rounded shadow">
+                                  <span className="absolute -top-1 -right-1 bg-red-500 text-white font-extrabold text-[7px] px-1 py-0.2 rounded shadow">
                                     缺货
                                   </span>
                                 )}
@@ -1368,36 +1562,36 @@ export default function CustomerMiniProgram({
                       </div>
 
                       {/* Quantity Selector */}
-                      <div className="flex justify-between items-center py-2.5 border-b border-slate-900">
-                        <span className="text-[11px] font-bold text-slate-400">购买数量 (件)</span>
+                      <div className="flex justify-between items-center py-2.5 border-b border-slate-100">
+                        <span className="text-[11px] font-bold text-slate-500">购买数量 (件)</span>
                         <div className="flex items-center space-x-3">
                           <button
                             type="button"
                             onClick={() => setSkuQuantity(prev => Math.max(1, prev - 1))}
-                            className="w-7 h-7 bg-slate-900 rounded-lg text-slate-200 font-bold flex items-center justify-center cursor-pointer"
+                            className="w-7 h-7 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-700 font-bold flex items-center justify-center cursor-pointer"
                           >
                             -
                           </button>
-                          <span className="text-xs font-black text-white w-4 text-center">{skuQuantity}</span>
+                          <span className="text-xs font-black text-slate-800 w-4 text-center">{skuQuantity}</span>
                           <button
                             type="button"
                             onClick={() => setSkuQuantity(prev => prev + 1)}
-                            className="w-7 h-7 bg-slate-900 rounded-lg text-slate-200 font-bold flex items-center justify-center cursor-pointer"
+                            className="w-7 h-7 bg-slate-100 hover:bg-slate-200 rounded-lg text-slate-700 font-bold flex items-center justify-center cursor-pointer"
                           >
                             +
                           </button>
                         </div>
                       </div>
 
-                      {/* Out of Stock Mode inputs (CRITICAL REQUIREMENT) */}
+                      {/* Out of Stock Mode inputs */}
                       {isOutOfStockMode ? (
                         <div className="space-y-4">
                           <div className="space-y-1.5">
-                            <label className="text-[10px] font-bold text-slate-400 uppercase tracking-widest block">
+                            <label className="text-[10px] font-bold text-slate-500 uppercase tracking-widest block">
                               联系手机号 <span className="text-red-500">*</span>
                             </label>
                             <div className="relative">
-                              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-500">
+                              <span className="absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">
                                 <Phone size={12} />
                               </span>
                               <input
@@ -1406,7 +1600,7 @@ export default function CustomerMiniProgram({
                                 value={regPhone}
                                 onChange={(e) => setRegPhone(e.target.value.replace(/\D/g, "").slice(0, 11))}
                                 placeholder="请输入11位手机号用于接收调货短信"
-                                className="w-full bg-slate-950 border border-slate-800 rounded-xl py-2 pl-9 pr-4 text-xs font-semibold text-white placeholder-slate-700 focus:outline-none focus:border-red-500 font-mono"
+                                className="w-full bg-slate-50 border border-slate-200 rounded-xl py-2 pl-9 pr-4 text-xs font-semibold text-slate-800 placeholder-slate-400 focus:outline-none focus:border-red-500 font-mono"
                               />
                             </div>
                           </div>
@@ -1415,26 +1609,26 @@ export default function CustomerMiniProgram({
                             <button
                               type="button"
                               onClick={() => setIsOutOfStockMode(false)}
-                              className="w-1/3 border border-slate-800 hover:border-slate-700 text-slate-400 rounded-xl text-xs py-2.5 transition-all"
+                              className="w-1/3 border border-slate-200 hover:border-slate-300 text-slate-500 rounded-xl text-xs py-2.5 transition-all"
                             >
                               返回
                             </button>
                             <button
                               type="submit"
                               disabled={loading || regPhone.length !== 11}
-                              className="w-2/3 bg-red-600 hover:bg-red-500 disabled:bg-red-950/60 text-white font-black py-2.5 px-4 rounded-xl text-xs tracking-wider transition-all flex items-center justify-center space-x-1 uppercase cursor-pointer"
+                              className="w-2/3 bg-red-600 hover:bg-red-500 disabled:bg-slate-200 disabled:text-slate-400 text-white font-black py-2.5 px-4 rounded-xl text-xs tracking-wider transition-all flex items-center justify-center space-x-1 uppercase cursor-pointer"
                             >
                               {loading ? "登记提交中..." : "立即登记"}
                             </button>
                           </div>
                         </div>
                       ) : (
-                        /* Normal mode: Add to cart / instant purchase */
+                        /* Normal mode: Add to cart / instant purchase - NO PHONE REQUIRED */
                         <div className="grid grid-cols-2 gap-2 pt-1">
                           <button
                             type="button"
                             onClick={handleAddToCart}
-                            className="bg-slate-900 hover:bg-slate-850 text-slate-200 py-2.5 rounded-xl text-xs font-black border border-slate-800 transition-colors"
+                            className="bg-slate-100 hover:bg-slate-200 text-slate-700 py-2.5 rounded-xl text-xs font-black border border-slate-200 transition-colors"
                           >
                             加入购物车
                           </button>
@@ -1446,7 +1640,7 @@ export default function CustomerMiniProgram({
                               setShowSkuModal(false);
                               setShowCheckoutModal(true);
                             }}
-                            className="bg-gradient-to-r from-blue-700 to-indigo-800 hover:from-blue-600 hover:to-indigo-750 text-white font-black py-2.5 rounded-xl text-xs shadow-md transition-all"
+                            className="bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-black py-2.5 rounded-xl text-xs shadow-xs transition-all"
                           >
                             立即购买/结算
                           </button>
@@ -1466,22 +1660,22 @@ export default function CustomerMiniProgram({
                 initial={{ opacity: 0 }} 
                 animate={{ opacity: 1 }} 
                 exit={{ opacity: 0 }}
-                className="absolute inset-0 bg-black/80 z-30 flex items-end"
+                className="absolute inset-0 bg-black/60 z-30 flex items-end"
               >
                 <motion.div 
                   initial={{ y: "100%" }} 
                   animate={{ y: 0 }} 
                   exit={{ y: "100%" }}
                   transition={{ type: "spring", damping: 25, stiffness: 200 }}
-                  className="bg-[#0f152b] w-full rounded-t-3xl p-5 pb-8 space-y-4 max-h-[85%] border-t border-blue-900/40"
+                  className="bg-white w-full rounded-t-3xl p-5 pb-8 space-y-4 max-h-[85%] border-t border-slate-200 text-slate-800 shadow-xl"
                 >
-                  <div className="flex justify-between items-center border-b border-slate-900 pb-3">
-                    <span className="text-xs font-black text-slate-100 uppercase tracking-wider">
-                      校服现货结算下单
+                  <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+                    <span className="text-xs font-black text-slate-800 uppercase tracking-wider">
+                      校服现货结算下单 (免登记手机号)
                     </span>
                     <button 
                       onClick={() => setShowCheckoutModal(false)}
-                      className="text-[10px] text-slate-400 hover:text-slate-200 bg-slate-900 w-6 h-6 rounded-full flex items-center justify-center font-bold"
+                      className="text-[10px] text-slate-400 hover:text-slate-600 bg-slate-100 w-6 h-6 rounded-full flex items-center justify-center font-bold"
                     >
                       ✕
                     </button>
@@ -1493,15 +1687,15 @@ export default function CustomerMiniProgram({
                       animate={{ opacity: 1, scale: 1 }}
                       className="py-6 flex flex-col items-center text-center space-y-4"
                     >
-                      <div className="w-12 h-12 bg-emerald-950/50 text-emerald-400 rounded-full flex items-center justify-center border border-emerald-500/30">
+                      <div className="w-12 h-12 bg-emerald-50 text-emerald-600 rounded-full flex items-center justify-center border border-emerald-100">
                         <CheckCircle size={24} className="animate-bounce" />
                       </div>
                       <div className="space-y-1">
-                        <h4 className="text-xs font-black text-white">正常下单成功！</h4>
-                        <p className="text-[10px] text-slate-400">已为您自动分配到校服领取窗口排号：</p>
-                        <h1 className="text-3xl font-black text-blue-400 tracking-wider font-mono">{newTicketNumber}</h1>
+                        <h4 className="text-xs font-black text-slate-800">正常下单成功！</h4>
+                        <p className="text-[10px] text-slate-500">已为您自动分配到校服领取窗口排号：</p>
+                        <h1 className="text-3xl font-black text-blue-600 tracking-wider font-mono">{newTicketNumber}</h1>
                       </div>
-                      <p className="text-[9.5px] text-slate-500 max-w-[250px] leading-relaxed">
+                      <p className="text-[9.5px] text-slate-400 max-w-[250px] leading-relaxed">
                         您的叫号单已经保存在小程序中，再次扫码也保持此状态。请在大厅等候配货叫号呼叫。
                       </p>
                     </motion.div>
@@ -1509,27 +1703,27 @@ export default function CustomerMiniProgram({
                     <form onSubmit={handlePlaceOrder} className="space-y-4">
                       
                       {/* Products preview in checkout */}
-                      <div className="bg-slate-950/50 rounded-xl p-3 border border-slate-900 space-y-2 max-h-36 overflow-y-auto">
+                      <div className="bg-slate-50 rounded-xl p-3 border border-slate-150 space-y-2 max-h-36 overflow-y-auto">
                         <span className="text-[9px] text-slate-500 block font-bold">已订校服列表：</span>
                         {cart.map((item, index) => (
-                          <div key={index} className="flex justify-between text-xs text-slate-200 font-mono">
+                          <div key={index} className="flex justify-between text-xs text-slate-700 font-mono">
                             <span>{item.product.name} ({item.size}码)</span>
-                            <span className="text-blue-400 font-bold">x{item.quantity} 件</span>
+                            <span className="text-blue-600 font-bold">x{item.quantity} 件</span>
                           </div>
                         ))}
-                        <div className="text-right border-t border-slate-900 pt-1.5 text-xs text-blue-400 font-black">
+                        <div className="text-right border-t border-slate-200 pt-1.5 text-xs text-blue-600 font-black">
                           应付金额：¥{cart.reduce((sum, item) => sum + (item.product.price * item.quantity), 0)}
                         </div>
                       </div>
 
-                      <div className="bg-slate-950 p-3 rounded-xl space-y-1 text-[9.5px] text-slate-400 border border-slate-900 leading-relaxed">
+                      <div className="bg-blue-50 p-3 rounded-xl space-y-1 text-[9.5px] text-blue-700 border border-blue-100 leading-relaxed">
                         💡 <strong>说明：</strong> 下单后系统会自动为您生成一张“校服领取U号”。由于校服款式繁多，库房配货老师需按订单进行配货并熨烫，叫号呼叫后请前往柜台。
                       </div>
 
                       <button
                         type="submit"
                         disabled={loading}
-                        className="w-full bg-gradient-to-r from-blue-700 to-indigo-800 hover:from-blue-600 hover:to-indigo-700 text-white font-black py-2.5 px-4 rounded-xl text-xs tracking-wider transition-all flex items-center justify-center space-x-1 uppercase cursor-pointer"
+                        className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-black py-2.5 px-4 rounded-xl text-xs tracking-wider transition-all flex items-center justify-center space-x-1 uppercase cursor-pointer"
                       >
                         {loading ? "正在处理校服订单..." : "立即下单并分配领取排号"}
                       </button>
@@ -1546,22 +1740,22 @@ export default function CustomerMiniProgram({
                 initial={{ opacity: 0 }} 
                 animate={{ opacity: 1 }} 
                 exit={{ opacity: 0 }}
-                className="absolute inset-0 bg-black/80 z-30 flex items-end"
+                className="absolute inset-0 bg-black/60 z-30 flex items-end"
               >
                 <motion.div 
                   initial={{ y: "100%" }} 
                   animate={{ y: 0 }} 
                   exit={{ y: "100%" }}
                   transition={{ type: "spring", damping: 25, stiffness: 200 }}
-                  className="bg-[#0f152b] w-full rounded-t-3xl p-5 pb-8 space-y-4 border-t border-blue-900/40"
+                  className="bg-white w-full rounded-t-3xl p-5 pb-8 space-y-4 border-t border-slate-200 shadow-xl"
                 >
-                  <div className="flex justify-between items-center border-b border-slate-900 pb-3">
-                    <span className="text-xs font-black text-slate-100 uppercase tracking-wider">
+                  <div className="flex justify-between items-center border-b border-slate-100 pb-3">
+                    <span className="text-xs font-black text-slate-800 uppercase tracking-wider">
                       自助获取等候排号
                     </span>
                     <button 
                       onClick={() => setShowManualTicketModal(false)}
-                      className="text-[10px] text-slate-400 hover:text-slate-200 bg-slate-900 w-6 h-6 rounded-full flex items-center justify-center font-bold"
+                      className="text-[10px] text-slate-400 hover:text-slate-600 bg-slate-100 w-6 h-6 rounded-full flex items-center justify-center font-bold"
                     >
                       ✕
                     </button>
@@ -1569,9 +1763,9 @@ export default function CustomerMiniProgram({
 
                   <form onSubmit={handleManualTicketSubmit} className="space-y-4">
                     <div className="space-y-1">
-                      <span className="text-[10px] text-slate-400 block font-bold">排队类型</span>
-                      <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-900 text-xs font-extrabold text-blue-400 flex items-center space-x-2">
-                        {getQueueIcon(manualTicketType, "w-4 h-4 text-blue-400")}
+                      <span className="text-[10px] text-slate-500 block font-bold">排队类型</span>
+                      <div className="bg-slate-50 p-2.5 rounded-xl border border-slate-200 text-xs font-extrabold text-blue-600 flex items-center space-x-2">
+                        {getQueueIcon(manualTicketType, "w-4 h-4 text-blue-600")}
                         <span>{getQueueName(manualTicketType)}</span>
                       </div>
                     </div>
@@ -1579,7 +1773,7 @@ export default function CustomerMiniProgram({
                     <button
                       type="submit"
                       disabled={loading}
-                      className="w-full bg-gradient-to-r from-blue-700 to-indigo-800 hover:from-blue-600 hover:to-indigo-700 text-white font-black py-2.5 px-4 rounded-xl text-xs tracking-wider transition-all flex items-center justify-center space-x-1 uppercase cursor-pointer"
+                      className="w-full bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 text-white font-black py-2.5 px-4 rounded-xl text-xs tracking-wider transition-all flex items-center justify-center space-x-1 uppercase cursor-pointer"
                     >
                       {loading ? "取号中..." : "确认获取排号"}
                     </button>
@@ -1588,392 +1782,367 @@ export default function CustomerMiniProgram({
               </motion.div>
             )}
 
+
           </AnimatePresence>
 
         </div>
       </div>
+      )}
 
       {/* ========================================================== */}
       {/* RIGHT: LCD Queue Calling Display Screen & IoT Simulation Remote */}
       {/* ========================================================== */}
-      <div className="flex-1 min-w-[320px] max-w-md space-y-4">
-        
-        {/* TV BIG SCREEN MONITOR BOARD */}
-        <div className="bg-[#050914] border-4 border-slate-950 rounded-3xl shadow-2xl p-4 relative overflow-hidden ring-2 ring-slate-800/50">
+      {showRight && (
+        <div className="flex-1 min-w-[320px] max-w-md space-y-4 animate-fade-in">
           
-          {/* Glass glare effect for TV screen look */}
-          <div className="absolute top-0 left-0 right-0 h-[40%] bg-gradient-to-b from-white/5 to-transparent pointer-events-none z-10"></div>
-          
-          {/* TV Screen Top Bezel indicator */}
-          <div className="flex items-center justify-between border-b border-blue-950/80 pb-3 mb-4 text-slate-200">
-            <div className="flex items-center space-x-2">
-              <span className="flex h-2 w-2 relative">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400"></span>
-              </span>
-              <div className="text-left">
-                <span className="text-[11px] font-black text-white tracking-widest block">阳光校服智能排号大屏幕</span>
-                <span className="text-[8px] text-slate-400 font-mono block tracking-wider uppercase">LED PUBLIC BROADCASTING BOARD</span>
-              </div>
-            </div>
+          {/* TV BIG SCREEN MONITOR BOARD */}
+          <div className="bg-[#050914] border-4 border-slate-950 rounded-3xl shadow-2xl p-4 relative overflow-hidden ring-2 ring-slate-800/50">
             
-            {/* TV Clock Display */}
-            <div className="text-right">
-              <span className="text-xs font-mono font-black text-emerald-400 bg-emerald-950/30 px-2.5 py-1 rounded border border-emerald-950/40 tracking-widest">
-                {currentTime || "09:00:00"}
-              </span>
-            </div>
-          </div>
-
-          {/* LED NOW CALLING STATE BOARD (机场航显式大卡片) */}
-          <div className="space-y-3">
-            <div className="text-center py-1">
-              <span className="text-[9px] bg-blue-950/80 text-blue-400 border border-blue-900/40 px-3 py-0.5 rounded-full font-black tracking-widest uppercase">
-                🔔 正在呼叫 / NOW CALLING
-              </span>
-            </div>
-
-            <div className="grid grid-cols-1 gap-2.5">
-              
-              {/* CATEGORY U - UNIFORM PICKUP */}
-              <div className="bg-[#02050c]/90 border border-blue-950 rounded-2xl p-3 flex items-center justify-between shadow-inner relative overflow-hidden group">
-                <div className="absolute left-0 top-0 bottom-0 w-1 bg-blue-500"></div>
-                <div className="flex items-center space-x-3">
-                  <div className="w-10 h-10 rounded-xl bg-blue-500/10 border border-blue-500/20 flex flex-col items-center justify-center text-blue-400">
-                    <ShoppingBag size={18} />
-                    <span className="text-[7px] font-black mt-0.5">领配</span>
-                  </div>
-                  <div className="text-left">
-                    <span className="text-[9px] text-slate-500 font-bold block">1号柜台 (校服发配)</span>
-                    <span className="text-[10px] text-slate-300 font-extrabold truncate max-w-[130px] block">
-                      {queueStatus?.currentCalled.U ? "已关联学校现货" : "暂无呼叫"}
-                    </span>
-                  </div>
-                </div>
-                
-                <div className="text-right flex items-center space-x-2.5">
-                  <span className="text-2xl font-black font-mono tracking-tighter text-blue-400 text-shadow-blue animate-pulse">
-                    {queueStatus?.currentCalled.U || "---"}
-                  </span>
-                  {queueStatus?.currentCalled.U && (
-                    <button
-                      onClick={() => speakCall(queueStatus.currentCalled.U, "U")}
-                      className="w-6 h-6 rounded-full bg-blue-950 border border-blue-900/40 flex items-center justify-center text-blue-300 hover:bg-blue-900 hover:text-white transition-all cursor-pointer"
-                      title="重播播报"
-                    >
-                      <Volume2 size={12} />
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* CATEGORY A - SIZE ALTERATION */}
-              <div className="bg-[#02050c]/90 border border-indigo-950 rounded-2xl p-3 flex items-center justify-between shadow-inner relative overflow-hidden group">
-                <div className="absolute left-0 top-0 bottom-0 w-1 bg-indigo-500"></div>
-                <div className="flex items-center space-x-3">
-                  <div className="w-10 h-10 rounded-xl bg-indigo-500/10 border border-indigo-500/20 flex flex-col items-center justify-center text-indigo-400">
-                    <Scissors size={16} />
-                    <span className="text-[7px] font-black mt-0.5">调换</span>
-                  </div>
-                  <div className="text-left">
-                    <span className="text-[9px] text-slate-500 font-bold block">2号柜台 (试衣改衣)</span>
-                    <span className="text-[10px] text-slate-300 font-extrabold block">
-                      {queueStatus?.currentCalled.A ? "尺码异常/售后调换" : "暂无呼叫"}
-                    </span>
-                  </div>
-                </div>
-                
-                <div className="text-right flex items-center space-x-2.5">
-                  <span className="text-2xl font-black font-mono tracking-tighter text-indigo-400 text-shadow-blue animate-pulse">
-                    {queueStatus?.currentCalled.A || "---"}
-                  </span>
-                  {queueStatus?.currentCalled.A && (
-                    <button
-                      onClick={() => speakCall(queueStatus.currentCalled.A, "A")}
-                      className="w-6 h-6 rounded-full bg-indigo-950 border border-indigo-900/40 flex items-center justify-center text-indigo-300 hover:bg-indigo-900 hover:text-white transition-all cursor-pointer"
-                      title="重播播报"
-                    >
-                      <Volume2 size={12} />
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {/* CATEGORY C - CASHIER REGISTER */}
-              <div className="bg-[#02050c]/90 border border-sky-950 rounded-2xl p-3 flex items-center justify-between shadow-inner relative overflow-hidden group">
-                <div className="absolute left-0 top-0 bottom-0 w-1 bg-sky-500"></div>
-                <div className="flex items-center space-x-3">
-                  <div className="w-10 h-10 rounded-xl bg-sky-500/10 border border-sky-500/20 flex flex-col items-center justify-center text-sky-400">
-                    <CreditCard size={16} />
-                    <span className="text-[7px] font-black mt-0.5">收银</span>
-                  </div>
-                  <div className="text-left">
-                    <span className="text-[9px] text-slate-500 font-bold block">3号柜台 (财务开单)</span>
-                    <span className="text-[10px] text-slate-300 font-extrabold block">
-                      {queueStatus?.currentCalled.C ? "非预定现场结账" : "暂无呼叫"}
-                    </span>
-                  </div>
-                </div>
-                
-                <div className="text-right flex items-center space-x-2.5">
-                  <span className="text-2xl font-black font-mono tracking-tighter text-sky-400 text-shadow-blue animate-pulse">
-                    {queueStatus?.currentCalled.C || "---"}
-                  </span>
-                  {queueStatus?.currentCalled.C && (
-                    <button
-                      onClick={() => speakCall(queueStatus.currentCalled.C, "C")}
-                      className="w-6 h-6 rounded-full bg-sky-950 border border-sky-900/40 flex items-center justify-center text-sky-300 hover:bg-sky-900 hover:text-white transition-all cursor-pointer"
-                      title="重播播报"
-                    >
-                      <Volume2 size={12} />
-                    </button>
-                  )}
-                </div>
-              </div>
-
-            </div>
-          </div>
-
-          {/* SCREEN WAITING TICKETS FOOTER BAR (底栏滚动等候提示) */}
-          <div className="mt-4 pt-3.5 border-t border-blue-950/80 bg-[#02050c]/40 p-2.5 rounded-xl text-left">
-            <span className="text-[9px] font-black text-slate-500 uppercase tracking-widest block mb-1.5">
-              🕒 门店实时等候中号码 ({queueStatus?.totalWaitingCount || 0}人等候)：
-            </span>
-            <div className="space-y-1.5 text-[10px]">
+            {/* Glass glare effect for TV screen look */}
+            <div className="absolute top-0 left-0 right-0 h-[40%] bg-gradient-to-b from-white/5 to-transparent pointer-events-none z-10"></div>
+            
+            {/* TV Screen Top Bezel indicator */}
+            <div className="flex items-center justify-between border-b border-blue-950/80 pb-3 mb-4 text-slate-200">
               <div className="flex items-center space-x-2">
-                <span className="bg-blue-950 text-blue-400 font-mono font-bold px-1.5 py-0.2 rounded shrink-0 scale-90">发配(U)</span>
-                <span className="text-slate-300 font-mono font-extrabold truncate">
-                  {queueStatus?.waitingList.U.length === 0 
-                    ? "暂无等候" 
-                    : queueStatus?.waitingList.U.map(t => t.number).join(", ")
-                  }
+                <span className="flex h-2 w-2 relative">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-400"></span>
                 </span>
-              </div>
-              <div className="flex items-center space-x-2">
-                <span className="bg-indigo-950 text-indigo-400 font-mono font-bold px-1.5 py-0.2 rounded shrink-0 scale-90">调换(A)</span>
-                <span className="text-slate-300 font-mono font-extrabold truncate">
-                  {queueStatus?.waitingList.A.length === 0 
-                    ? "暂无等候" 
-                    : queueStatus?.waitingList.A.map(t => t.number).join(", ")
-                  }
-                </span>
-              </div>
-              <div className="flex items-center space-x-2">
-                <span className="bg-sky-950 text-sky-400 font-mono font-bold px-1.5 py-0.2 rounded shrink-0 scale-90">收银(C)</span>
-                <span className="text-slate-300 font-mono font-extrabold truncate">
-                  {queueStatus?.waitingList.C.length === 0 
-                    ? "暂无等候" 
-                    : queueStatus?.waitingList.C.map(t => t.number).join(", ")
-                  }
-                </span>
-              </div>
-            </div>
-          </div>
-
-          {/* TV Bottom Bezel Support Stand mockup */}
-          <div className="mt-2 text-center select-none text-slate-800 text-[8px] tracking-widest font-black">
-            ────────── IoT SMART MONITOR PANEL ──────────
-          </div>
-        </div>
-
-        {/* IOT SIMULATED REMOTE CONTROLLER DEVICE (大屏遥控调试器) */}
-        <div className="bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800 rounded-2xl p-4 shadow-xl space-y-4">
-          <div className="flex items-center justify-between border-b border-slate-850 pb-2">
-            <h3 className="text-xs font-black text-slate-200 uppercase tracking-widest flex items-center space-x-1.5">
-              <Sliders size={13} className="text-blue-400" />
-              <span>📱 大屏叫号测试遥控器</span>
-            </h3>
-            <span className="text-[8px] bg-blue-950 text-blue-400 font-mono px-1.5 py-0.2 rounded font-bold uppercase tracking-wider">
-              IoT Remote
-            </span>
-          </div>
-
-          {/* Auto Simulation Trigger and Remote Info */}
-          <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-900/50 space-y-2">
-            <div className="flex items-center justify-between">
-              <div className="text-left">
-                <span className="text-[10px] font-extrabold text-blue-400 block">自动仿真循环演练模式</span>
-                <p className="text-[8px] text-slate-500 font-medium leading-none mt-0.5">每 12 秒自动叫号并播放真人语音</p>
+                <div className="text-left">
+                  <span className="text-[11px] font-black text-white tracking-widest block">阳光校服智能排号大屏幕</span>
+                  <span className="text-[8px] text-slate-400 font-mono block tracking-wider uppercase">LED PUBLIC BROADCASTING BOARD</span>
+                </div>
               </div>
               
-              <button
-                onClick={() => setAutoCallMode(!autoCallMode)}
-                className={`text-[9px] font-black px-3 py-1.5 rounded-lg transition-all flex items-center space-x-1 cursor-pointer ${
-                  autoCallMode 
-                    ? "bg-emerald-600 text-white shadow-md shadow-emerald-900/20" 
-                    : "bg-slate-900 text-slate-400 border border-slate-800 hover:border-slate-700"
-                }`}
-              >
-                <span>{autoCallMode ? "🟢 自动轮叫中" : "🔴 点击开启自动"}</span>
-              </button>
-            </div>
-          </div>
-
-          {/* Smart call simulation buttons */}
-          <div className="space-y-2">
-            <span className="text-[9px] text-slate-400 font-black tracking-widest block uppercase px-0.5">一键触发下一位叫号 (模拟各柜台办理)：</span>
-            <div className="grid grid-cols-3 gap-1.5">
-              {[
-                { type: "U", name: "1号柜台领配" },
-                { type: "A", name: "2号柜台试穿" },
-                { type: "C", name: "3号柜台收银" }
-              ].map(call => (
+              {/* TV Clock Display */}
+              <div className="text-right flex items-center space-x-2">
                 <button
-                  key={call.type}
-                  onClick={() => onCallNext(call.type as any)}
-                  className="bg-slate-950 border border-slate-850 hover:border-blue-500 text-slate-200 py-2 px-1 rounded-xl text-[10px] font-black hover:bg-blue-950/20 transition-all flex flex-col items-center justify-center space-y-1 cursor-pointer"
+                  onClick={() => setShowRemote(!showRemote)}
+                  className="text-[9px] bg-slate-900 hover:bg-slate-800 text-slate-400 px-2 py-1 rounded border border-slate-800 hover:border-slate-700 transition-all cursor-pointer font-bold shrink-0"
+                  title="切换显示/隐藏大屏叫号测试遥控器"
                 >
-                  {getQueueIcon(call.type as any, "w-3.5 h-3.5 text-blue-400")}
-                  <span>{call.name}</span>
+                  {showRemote ? "隐藏控制面板" : "模拟叫号遥控"}
                 </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Queue manipulation pool with Complete/Skip buttons so tester can handle queues */}
-          <div className="space-y-2 border-t border-slate-900 pt-3">
-            <div className="flex justify-between items-center px-0.5">
-              <span className="text-[9px] text-slate-400 font-black tracking-widest uppercase">
-                等候队列精准操作控制 ({queueStatus?.totalWaitingCount || 0}人等候)：
-              </span>
+                <span className="text-xs font-mono font-black text-emerald-400 bg-emerald-950/30 px-2.5 py-1 rounded border border-emerald-950/40 tracking-widest shrink-0">
+                  {currentTime || "09:00:00"}
+                </span>
+              </div>
             </div>
 
-            {queueStatus?.totalWaitingCount === 0 ? (
-              <p className="text-[10px] text-slate-600 italic py-2 text-center bg-slate-950/30 rounded-xl border border-slate-900/35">
-                当前暂无排队等候的家长号码...
-              </p>
-            ) : (
-              <div className="space-y-1.5 max-h-36 overflow-y-auto scrollbar-thin pr-1">
-                {(["U", "A", "C"] as const).map(type => {
-                  const list = queueStatus?.waitingList[type] || [];
-                  return list.map(ticket => (
-                    <div 
-                      key={ticket.id} 
-                      className="bg-slate-950/80 border border-slate-900 px-2 py-1.5 rounded-xl flex items-center justify-between text-[11px] shadow-sm"
-                    >
-                      <div className="text-left">
-                        <div className="flex items-center space-x-1.5">
-                          <span className="font-extrabold text-white font-mono">{ticket.number}</span>
-                          <span className="text-[8px] bg-slate-900 text-slate-400 font-mono px-1 rounded scale-90">
-                            {type === "U" ? "领取" : type === "A" ? "修改" : "收银"}
+            {/* LED NOW CALLING STATE BOARD (正在呼叫大卡片) */}
+            <div className="space-y-3">
+              <div className="text-center py-1">
+                <span className="text-[9px] bg-blue-950/80 text-blue-400 border border-blue-900/40 px-3 py-0.5 rounded-full font-black tracking-widest uppercase">
+                  🔔 正在呼叫 / NOW CALLING
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2.5">
+                {(() => {
+                  const isCalledU = queueStatus?.currentCalled.U && queueStatus?.currentCalled.U !== "无" && queueStatus?.currentCalled.U !== "---";
+                  const num = isCalledU ? queueStatus.currentCalled.U : "---";
+                  
+                  // Find the associated school name if available in history or waiting list
+                  const matchedTicket = historyTickets.find(h => h.number === num) || queueStatus?.waitingList.U.find(t => t.number === num);
+                  const schoolLabel = isCalledU ? (matchedTicket?.schoolName || "请携带手机至1号配货柜台") : "暂无呼叫号码";
+
+                  return (
+                    <div className={`relative overflow-hidden rounded-2xl p-3 border transition-all duration-300 flex items-center justify-between shadow-lg ${
+                      isCalledU
+                        ? "bg-[#040d21] border-blue-500 shadow-blue-950/20"
+                        : "bg-[#02050c]/50 border-slate-900/60 opacity-60"
+                    }`}>
+                      {/* Left accent bar */}
+                      <div className={`absolute left-0 top-0 bottom-0 w-1.5 ${isCalledU ? "bg-blue-500 animate-pulse" : "bg-slate-800"}`} />
+
+                      <div className="flex items-center space-x-3 pl-1">
+                        {/* Icon */}
+                        <div className={`w-10 h-10 rounded-xl flex flex-col items-center justify-center border shrink-0 ${
+                          isCalledU ? "bg-blue-500/10 border-blue-500/20 text-blue-400" : "bg-slate-950/50 border-slate-900/50 text-slate-600"
+                        }`}>
+                          <ShoppingBag size={18} />
+                          <span className="text-[7.5px] font-black mt-0.5 leading-none">领配</span>
+                        </div>
+
+                        {/* Info */}
+                        <div className="text-left">
+                          <div className="flex items-center space-x-1.5">
+                            <span className="text-[10px] text-slate-400 font-bold">1号柜台 (校服发配)</span>
+                            {isCalledU ? (
+                              <span className="text-[8px] bg-red-950 text-red-400 border border-red-900/40 px-1.5 py-0.2 rounded font-black tracking-wider uppercase flex items-center space-x-1 animate-pulse">
+                                <span className="h-1 w-1 rounded-full bg-red-400 animate-ping"></span>
+                                <span>请到柜台</span>
+                              </span>
+                            ) : (
+                              <span className="text-[8px] bg-slate-900 text-slate-500 px-1.5 py-0.2 rounded font-black tracking-wider">
+                                空闲
+                              </span>
+                            )}
+                          </div>
+                          <span className="text-[11px] text-slate-300 font-extrabold truncate max-w-[170px] block mt-0.5">
+                            {schoolLabel}
                           </span>
                         </div>
-                        {ticket.schoolName && (
-                          <span className="text-[8px] text-slate-500 block leading-none mt-0.5 truncate max-w-[150px]">
-                            学校：{ticket.schoolName}
-                          </span>
+                      </div>
+
+                      {/* Calling Number */}
+                      <div className="text-right flex items-center space-x-2 shrink-0">
+                        <span className={`text-3xl font-black font-mono tracking-tighter ${
+                          isCalledU ? "text-blue-400 text-shadow-blue animate-pulse" : "text-slate-700"
+                        }`}>
+                          {num}
+                        </span>
+                        {isCalledU && (
+                          <button
+                            onClick={() => speakCall(num, "U")}
+                            className="w-7 h-7 rounded-full bg-blue-950 border border-blue-900/40 flex items-center justify-center text-blue-300 hover:bg-blue-900 hover:text-white transition-all cursor-pointer shadow-sm active:scale-95 shrink-0"
+                            title="重播呼叫"
+                          >
+                            <Volume2 size={12} />
+                          </button>
                         )}
                       </div>
+                    </div>
+                  );
+                })()}
+              </div>
+            </div>
 
-                      <div className="flex space-x-1 shrink-0">
-                        <button
-                          onClick={() => speakCall(ticket.number, type)}
-                          className="bg-blue-950/40 text-blue-400 border border-blue-900/40 hover:bg-blue-900 hover:text-white text-[8px] font-black px-1.5 py-0.5 rounded transition-all cursor-pointer"
-                        >
-                          🔊 广播
-                        </button>
-                        <button
-                          onClick={() => onSkipTicket(ticket.id)}
-                          className="bg-slate-900 hover:bg-slate-800 text-slate-400 text-[8px] font-black px-1.5 py-0.5 rounded transition-all cursor-pointer"
-                        >
-                          过号
-                        </button>
-                        <button
-                          onClick={() => onCompleteTicket(ticket.id)}
-                          className="bg-emerald-950/40 text-emerald-400 hover:bg-emerald-900 border border-emerald-900 text-[8px] font-black px-1.5 py-0.5 rounded transition-all cursor-pointer"
-                        >
-                          办理完成
-                        </button>
+            {/* LED WAITING QUEUE BOARD (等候队列卡片 - 与呼叫卡样式完全一致) */}
+            <div className="space-y-3 mt-4 pt-4 border-t border-blue-950/40">
+              <div className="text-center py-1 flex items-center justify-center space-x-2">
+                <span className="text-[9px] bg-slate-900/80 text-slate-400 border border-slate-800 px-3 py-0.5 rounded-full font-black tracking-widest uppercase">
+                  🕒 等候中号码 / WAITING IN LINE ({queueStatus?.waitingList.U.length || 0}人等候)
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 gap-2.5 max-h-[260px] overflow-y-auto pr-1 scrollbar-thin">
+                {queueStatus?.waitingList.U.length === 0 ? (
+                  /* Empty/Idle waiting card with the SAME structure */
+                  <div className="relative overflow-hidden rounded-2xl p-3 border border-slate-900/60 bg-[#02050c]/30 opacity-50 flex items-center justify-between shadow-inner">
+                    <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-slate-800" />
+                    <div className="flex items-center space-x-3 pl-1">
+                      <div className="w-10 h-10 rounded-xl bg-slate-950/50 border border-slate-900/50 text-slate-700 flex flex-col items-center justify-center shrink-0">
+                        <ShoppingBag size={18} />
+                        <span className="text-[7.5px] font-black mt-0.5 leading-none">等候</span>
+                      </div>
+                      <div className="text-left">
+                        <span className="text-[10px] text-slate-500 font-bold block">1号柜台 (校服发配)</span>
+                        <span className="text-[11px] text-slate-400 font-extrabold block mt-0.5">暂无等候的家长</span>
                       </div>
                     </div>
-                  ));
-                })}
+                    <span className="text-3xl font-black font-mono tracking-tighter text-slate-800 pr-2">
+                      ---
+                    </span>
+                  </div>
+                ) : (
+                  /* List of waiting cards with the EXACT SAME layout structure but labeled as "等候中" */
+                  queueStatus?.waitingList.U.slice(0, 4).map((ticket) => (
+                    <div 
+                      key={ticket.id}
+                      className="relative overflow-hidden rounded-2xl p-3 border border-slate-800 bg-[#070e1d]/85 hover:border-slate-700 transition-all duration-300 flex items-center justify-between shadow-md"
+                    >
+                      {/* Left accent bar */}
+                      <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-slate-600" />
+
+                      <div className="flex items-center space-x-3 pl-1">
+                        {/* Icon */}
+                        <div className="w-10 h-10 rounded-xl bg-slate-950/80 border border-slate-855 text-slate-400 flex flex-col items-center justify-center shrink-0">
+                          <ShoppingBag size={18} />
+                          <span className="text-[7.5px] font-black mt-0.5 leading-none">领配</span>
+                        </div>
+
+                        {/* Info */}
+                        <div className="text-left">
+                          <div className="flex items-center space-x-1.5">
+                            <span className="text-[10px] text-slate-400 font-bold">1号柜台 (校服发配)</span>
+                            <span className="text-[8px] bg-slate-900 text-slate-300 border border-slate-850 px-1.5 py-0.2 rounded font-black tracking-wider uppercase">
+                              等候中
+                            </span>
+                          </div>
+                          <span className="text-[11px] text-slate-300 font-extrabold truncate max-w-[170px] block mt-0.5">
+                            {ticket.schoolName || "已绑定校服现货"}
+                          </span>
+                        </div>
+                      </div>
+
+                      {/* Waiting Number */}
+                      <div className="text-right pr-2 shrink-0">
+                        <span className="text-3xl font-black font-mono tracking-tighter text-slate-200">
+                          {ticket.number}
+                        </span>
+                      </div>
+                    </div>
+                  ))
+                )}
+
+                {queueStatus?.waitingList.U && queueStatus.waitingList.U.length > 4 && (
+                  <div className="text-center text-[9px] text-slate-500 font-bold tracking-widest uppercase bg-slate-950/20 py-1.5 rounded-lg border border-slate-900/30">
+                    + 还有 {queueStatus.waitingList.U.length - 4} 个号码在后续队列中...
+                  </div>
+                )}
               </div>
-            )}
+            </div>
+
+            {/* TV Bottom Bezel Support Stand mockup */}
+            <div className="mt-2 text-center select-none text-slate-800 text-[8px] tracking-widest font-black">
+              ────────── IoT SMART MONITOR PANEL ──────────
+            </div>
           </div>
 
-          {/* OUT OF STOCK DISPATCH LOGS COMPACT BAR (缺货追踪与极简操作) */}
-          {registrations.length > 0 && (
-            <div className="space-y-2 border-t border-slate-900 pt-3 text-left">
-              <span className="text-[9px] text-slate-400 font-black tracking-widest block uppercase px-0.5">
-                📦 缺货补配登记池 ({registrations.filter(r => r.status === "pending").length} 单待调配)：
-              </span>
-              <div className="space-y-1.5 max-h-28 overflow-y-auto scrollbar-thin pr-1">
-                {registrations.map(reg => (
-                  <div 
-                    key={reg.id} 
-                    className={`border px-2 py-1 rounded-lg flex items-center justify-between text-[10px] shadow-sm transition-all ${
-                      reg.status === "resolved" 
-                        ? "bg-slate-950/20 border-slate-950 text-slate-600" 
-                        : "bg-red-950/5 border-red-950/25 text-slate-300"
+          {/* IOT SIMULATED REMOTE CONTROLLER DEVICE (大屏遥控调试器) */}
+          {showRemote && (
+            <div className="bg-gradient-to-br from-slate-900 to-slate-950 border border-slate-800 rounded-2xl p-4 shadow-xl space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-850 pb-2">
+                <h3 className="text-xs font-black text-slate-200 uppercase tracking-widest flex items-center space-x-1.5">
+                  <Sliders size={13} className="text-blue-400" />
+                  <span>📱 大屏叫号测试遥控器</span>
+                </h3>
+                <span className="text-[8px] bg-blue-950 text-blue-400 font-mono px-1.5 py-0.2 rounded font-bold uppercase tracking-wider">
+                  IoT Remote
+                </span>
+              </div>
+
+              {/* Auto Simulation Trigger and Remote Info */}
+              <div className="bg-slate-950 p-2.5 rounded-xl border border-slate-900/50 space-y-2">
+                <div className="flex items-center justify-between">
+                  <div className="text-left">
+                    <span className="text-[10px] font-extrabold text-blue-400 block">自动仿真循环演练模式</span>
+                    <p className="text-[8px] text-slate-500 font-medium leading-none mt-0.5">每 12 秒自动叫号并播放真人语音</p>
+                  </div>
+                  
+                  <button
+                    onClick={() => setAutoCallMode(!autoCallMode)}
+                    className={`text-[9px] font-black px-3 py-1.5 rounded-lg transition-all flex items-center space-x-1 cursor-pointer ${
+                      autoCallMode 
+                        ? "bg-emerald-600 text-white shadow-md shadow-emerald-900/20" 
+                        : "bg-slate-900 text-slate-400 border border-slate-800 hover:border-slate-700"
                     }`}
                   >
-                    <div className="text-left">
-                      <div className="flex items-center space-x-1">
-                        <span className="font-extrabold text-slate-200">{reg.itemName}</span>
-                        <span className="text-[8px] bg-red-950/40 text-red-400 px-1 rounded scale-90">
-                          {reg.size}
-                        </span>
-                      </div>
-                      <span className="text-[8px] text-slate-500 block">学校：{reg.schoolName} | {reg.phoneNumber}</span>
-                    </div>
+                    <span>{autoCallMode ? "🟢 自动轮叫中" : "🔴 点击开启自动"}</span>
+                  </button>
+                </div>
+              </div>
 
-                    <div className="shrink-0">
-                      {reg.status === "pending" ? (
-                        <button
-                          onClick={() => onHandleOutOfStock(reg.id)}
-                          className="bg-red-950 hover:bg-red-900/60 border border-red-900/40 text-red-400 text-[8px] font-black px-1.5 py-0.5 rounded transition-all cursor-pointer"
+              {/* Smart call simulation buttons */}
+              <div className="space-y-2">
+                <span className="text-[9px] text-slate-400 font-black tracking-widest block uppercase px-0.5">一键触发下一位叫号 (模拟柜台办理)：</span>
+                <div className="grid grid-cols-1 gap-1.5">
+                  {[
+                    { type: "U", name: "1号柜台领配" }
+                  ].map(call => (
+                    <button
+                      key={call.type}
+                      onClick={() => onCallNext(call.type as any)}
+                      className="bg-slate-950 border border-slate-850 hover:border-blue-500 text-slate-200 py-2.5 px-3 rounded-xl text-xs font-black hover:bg-blue-950/20 transition-all flex items-center justify-center space-x-2 cursor-pointer"
+                    >
+                      {getQueueIcon(call.type as any, "w-4 h-4 text-blue-400")}
+                      <span>呼叫下一位 ({call.name})</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              {/* Queue manipulation pool with Complete/Skip buttons so tester can handle queues */}
+              <div className="space-y-2 border-t border-slate-900 pt-3">
+                <div className="flex justify-between items-center px-0.5">
+                  <span className="text-[9px] text-slate-400 font-black tracking-widest uppercase">
+                    等候队列精准操作控制 ({queueStatus?.totalWaitingCount || 0}人等候)：
+                  </span>
+                </div>
+
+                {queueStatus?.totalWaitingCount === 0 ? (
+                  <p className="text-[10px] text-slate-600 italic py-2 text-center bg-slate-950/30 rounded-xl border border-slate-900/35">
+                    当前暂无排队等候的家长号码...
+                  </p>
+                ) : (
+                  <div className="space-y-1.5 max-h-36 overflow-y-auto scrollbar-thin pr-1">
+                    {(["U"] as const).map(type => {
+                      const list = queueStatus?.waitingList[type] || [];
+                      return list.map(ticket => (
+                        <div 
+                          key={ticket.id} 
+                          className="bg-slate-950/80 border border-slate-900 px-2 py-1.5 rounded-xl flex items-center justify-between text-[11px] shadow-sm"
                         >
-                          标记到货
-                        </button>
-                      ) : (
-                        <span className="text-[8px] text-emerald-500 font-extrabold">
-                          ✓ 已发通知短信
-                        </span>
-                      )}
-                    </div>
+                          <div className="text-left">
+                            <div className="flex items-center space-x-1.5">
+                              <span className="font-extrabold text-white font-mono">{ticket.number}</span>
+                              <span className="text-[8px] bg-slate-900 text-slate-400 font-mono px-1 rounded scale-90">
+                                领取
+                              </span>
+                            </div>
+                            {ticket.schoolName && (
+                              <span className="text-[8px] text-slate-500 block leading-none mt-0.5 truncate max-w-[150px]">
+                                学校：{ticket.schoolName}
+                              </span>
+                            )}
+                          </div>
+
+                          <div className="flex space-x-1 shrink-0">
+                            <button
+                              onClick={() => speakCall(ticket.number, type)}
+                              className="bg-blue-950/40 text-blue-400 border border-blue-900/40 hover:bg-blue-900 hover:text-white text-[8px] font-black px-1.5 py-0.5 rounded transition-all cursor-pointer"
+                            >
+                              🔊 广播
+                            </button>
+                            <button
+                              onClick={() => onSkipTicket(ticket.id)}
+                              className="bg-slate-900 hover:bg-slate-800 text-slate-400 text-[8px] font-black px-1.5 py-0.5 rounded transition-all cursor-pointer"
+                            >
+                              过号
+                            </button>
+                            <button
+                              onClick={() => onCompleteTicket(ticket.id)}
+                              className="bg-emerald-950/40 text-emerald-400 hover:bg-emerald-900 border border-emerald-900 text-[8px] font-black px-1.5 py-0.5 rounded transition-all cursor-pointer"
+                            >
+                              办理完成
+                            </button>
+                          </div>
+                        </div>
+                      ));
+                    })}
                   </div>
-                ))}
+                )}
+              </div>
+
+              {/* Reset button & Scenario Scans */}
+              <div className="border-t border-slate-900 pt-3 flex items-center justify-between gap-2.5">
+                <div className="flex items-center space-x-1 bg-slate-950 p-1 rounded-lg border border-slate-900">
+                  <button
+                    onClick={() => handleSimulateScan("first")}
+                    className="text-[8px] text-slate-400 hover:text-white px-1.5 py-0.5 rounded cursor-pointer font-bold"
+                    title="模拟首次到店"
+                  >
+                    情景A
+                  </button>
+                  <button
+                    onClick={() => handleSimulateScan("school_only")}
+                    className="text-[8px] text-slate-400 hover:text-white px-1.5 py-0.5 rounded cursor-pointer font-bold"
+                    title="模拟已选择学校"
+                  >
+                    情景B
+                  </button>
+                  <button
+                    onClick={() => handleSimulateScan("with_ticket")}
+                    className="text-[8px] text-slate-400 hover:text-white px-1.5 py-0.5 rounded cursor-pointer font-bold"
+                    title="模拟已有排队号"
+                  >
+                    情景C
+                  </button>
+                </div>
+
+                <button
+                  onClick={onResetSystem}
+                  className="text-[9px] bg-red-950/10 hover:bg-red-950/20 text-red-400 hover:text-red-300 border border-red-900/20 py-1 px-3 rounded-lg font-bold transition-all cursor-pointer"
+                >
+                  初始化所有排队模拟数据
+                </button>
               </div>
             </div>
           )}
 
-          {/* Reset button & Scenario Scans */}
-          <div className="border-t border-slate-900 pt-3 flex items-center justify-between gap-2.5">
-            <div className="flex items-center space-x-1 bg-slate-950 p-1 rounded-lg border border-slate-900">
-              <button
-                onClick={() => handleSimulateScan("first")}
-                className="text-[8px] text-slate-400 hover:text-white px-1.5 py-0.5 rounded cursor-pointer font-bold"
-                title="模拟首次到店"
-              >
-                情景A
-              </button>
-              <button
-                onClick={() => handleSimulateScan("school_only")}
-                className="text-[8px] text-slate-400 hover:text-white px-1.5 py-0.5 rounded cursor-pointer font-bold"
-                title="模拟已选择学校"
-              >
-                情景B
-              </button>
-              <button
-                onClick={() => handleSimulateScan("with_ticket")}
-                className="text-[8px] text-slate-400 hover:text-white px-1.5 py-0.5 rounded cursor-pointer font-bold"
-                title="模拟已有排队号"
-              >
-                情景C
-              </button>
-            </div>
-
-            <button
-              onClick={onResetSystem}
-              className="text-[9px] bg-red-950/10 hover:bg-red-950/20 text-red-400 hover:text-red-300 border border-red-900/20 py-1 px-3 rounded-lg font-bold transition-all cursor-pointer"
-            >
-              初始化所有排队模拟数据
-            </button>
-          </div>
         </div>
-
-      </div>
+      )}
 
     </div>
   );

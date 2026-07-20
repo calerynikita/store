@@ -22,6 +22,8 @@ export default function App() {
   const [notifications, setNotifications] = useState<AdminNotification[]>([]);
   const [systemLoading, setSystemLoading] = useState(false);
 
+  const [currentView, setCurrentView] = useState<"split" | "mini" | "tv">("split");
+
   // Sync state from server
   const fetchAllData = async () => {
     try {
@@ -48,10 +50,18 @@ export default function App() {
     }
   };
 
-  // Poll server state to achieve real-time responsiveness
+  // Poll server state to achieve real-time responsiveness and read view param
   useEffect(() => {
     fetchAllData();
     const timer = setInterval(fetchAllData, 1500);
+
+    // Parse URL parameter to support fully separated screens (mini vs tv vs split)
+    const params = new URLSearchParams(window.location.search);
+    const viewParam = params.get("view");
+    if (viewParam === "mini" || viewParam === "tv" || viewParam === "split") {
+      setCurrentView(viewParam);
+    }
+
     return () => clearInterval(timer);
   }, []);
 
@@ -220,11 +230,11 @@ export default function App() {
             <div className="flex items-center justify-center md:justify-start space-x-2">
               <h1 className="text-xl font-black text-slate-100 tracking-wider">SUNSHINE UNIFORMS</h1>
               <span className="bg-blue-500/15 text-blue-400 text-[9px] font-extrabold px-2.5 py-0.5 rounded-full border border-blue-500/20 tracking-widest uppercase">
-                阳光智能校服系统
+                阳光智能门店选购系统
               </span>
             </div>
             <p className="text-[11px] text-slate-400 mt-1">
-              合作中小学专供校服订购系统 • 微信小程序模拟（扫码选校 • 自助选尺码下单 • 缺货实时登记推送 • 智能排号领取）
+              合作中小学线下自助选购系统 • 微信小程序模拟（到店扫码选校 • 现场自主下单配货 • 缺货实时登记推送 • 1号柜台智能排号发配）
             </p>
           </div>
         </div>
@@ -240,6 +250,52 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* Modern High-End Multi-view Tab Switcher */}
+      <div className="w-full max-w-5xl mx-auto flex flex-col items-center shrink-0">
+        <div className="flex flex-wrap justify-center bg-slate-900/90 border border-slate-800 p-1.5 rounded-2xl gap-1.5 shadow-lg mb-4">
+          <button
+            onClick={() => setCurrentView("mini")}
+            className={`flex items-center space-x-1.5 px-4 py-2 rounded-xl text-xs font-black tracking-wide transition-all cursor-pointer ${
+              currentView === "mini"
+                ? "bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-500/20"
+                : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
+            }`}
+          >
+            <span>📱 微信小程序 (家长白色主题端)</span>
+          </button>
+          <button
+            onClick={() => setCurrentView("tv")}
+            className={`flex items-center space-x-1.5 px-4 py-2 rounded-xl text-xs font-black tracking-wide transition-all cursor-pointer ${
+              currentView === "tv"
+                ? "bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-500/20"
+                : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
+            }`}
+          >
+            <span>📺 门店排号叫号大屏 + 遥控器</span>
+          </button>
+          <button
+            onClick={() => setCurrentView("split")}
+            className={`flex items-center space-x-1.5 px-4 py-2 rounded-xl text-xs font-black tracking-wide transition-all cursor-pointer ${
+              currentView === "split"
+                ? "bg-gradient-to-r from-blue-600 to-indigo-600 text-white shadow-md shadow-blue-500/20"
+                : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/40"
+            }`}
+          >
+            <span>🔄 左右分屏实时同步联动</span>
+          </button>
+        </div>
+
+        {/* Informative advice label to help testing in real separate tabs */}
+        <div className="text-center mb-5 px-4">
+          <p className="text-[10.5px] text-slate-500 leading-relaxed bg-[#030611]/80 border border-slate-900/50 px-4.5 py-2.5 rounded-xl max-w-3xl mx-auto inline-block">
+            💡 <strong>联调测试指南：</strong> 您可以用新浏览器标签页打开 
+            <span className="text-blue-400 font-mono mx-1 font-bold underline select-all">/?view=mini</span> (家长端) 
+            与 <span className="text-blue-400 font-mono mx-1 font-bold underline select-all">/?view=tv</span> (大屏端)，
+            即可在两个独立窗口/设备中体验秒级同步的店面叫号、订单配货演练！
+          </p>
+        </div>
+      </div>
 
       {/* Main Single-View - Customer Mini Program + Admin IoT notification simulator */}
       <main className="w-full flex-1 flex items-center justify-center py-2">
@@ -258,6 +314,7 @@ export default function App() {
           onHandleOutOfStock={handleResolveOutOfStock}
           onClearNotification={handleClearNotification}
           onResetSystem={handleResetSystem}
+          currentView={currentView}
         />
       </main>
 
@@ -268,7 +325,7 @@ export default function App() {
           <span>© 2026 SUNSHINE UNIFORMS • 阳光学园智能服装门店管理中心. All Rights Reserved.</span>
         </p>
         <p className="font-mono bg-[#030712] px-3 py-1 rounded-full border border-blue-950/40">
-          Smart Queue Engine v2.1 • Zero Admin Overhead
+          Smart Queue Engine v2.5 • Zero Admin Overhead
         </p>
       </footer>
 
